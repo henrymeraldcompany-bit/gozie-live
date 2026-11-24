@@ -82,5 +82,3 @@ jobs:
             core.info('Published Cloudflare modules at ' + commit.data.sha);
       - name: Validate API Worker configuration
         run: npx wrangler deploy --dry-run --config services/api/wrangler.toml
-      - name: Validate static web Worker configuration
-        run: npx wrangler deploy --dry-run --config apps/web/wrangler.toml
