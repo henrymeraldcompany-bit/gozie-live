@@ -1,35 +1,37 @@
 # GOZIE LIVE
 
-GOZIE LIVE is a multi-camera live-streaming and broadcast-production application.
+GOZIE LIVE is a multi-camera live-streaming and broadcast-production application. Its target production stack is **Cloudflare-only**.
 
-## Website deployment
+## Website
 
-The production website is built from `apps/web` and published by the GitHub Actions workflow in `.github/workflows/deploy-pages.yml`. It is not the repository README.
+Current GitHub Pages preview: https://henrymeraldcompany-bit.github.io/gozie-live/
 
-GitHub Pages project URL: https://henrymeraldcompany-bit.github.io/gozie-live/
+The frontend source is in `apps/web`. The deployment workflow currently publishes a preview to GitHub Pages. The intended production hosting is Cloudflare Workers + Workers Static Assets.
 
-The Pages build uses the repository's nested `/gozie-live/` base path. The workflow reads these repository Actions variables when they are configured:
+## Cloudflare architecture
 
-- `GOZIE_LIVE_API_URL` — deployed API Worker URL, including `https://`.
-- `GOZIE_LIVE_SUPABASE_URL` — Supabase project URL.
-- `GOZIE_LIVE_SUPABASE_ANON_KEY` — Supabase publishable/anon key.
+- Workers: application API and web hosting.
+- D1: user accounts, sessions, contributor presence, commands and recording metadata.
+- Durable Objects: per-session coordination and admission control.
+- Realtime SFU + TURN: WebRTC camera publishing and media routing.
+- R2: private media assets and programme recordings.
+- Workflows / Queues / Cron: durable orchestration and seven-day cleanup.
+- Containers: independent server-side compositor for the final programme, subject to account/resource validation.
+- Stream: public delivery of the composed programme where the chosen output path supports it.
 
-These are public frontend configuration values, not secrets. Never put a Supabase service-role key, LiveKit API secret, or R2 S3 secret in a `VITE_*` variable or GitHub Pages build variable.
+No Supabase or LiveKit dependency is part of the target architecture. The existing API/frontend still contain legacy integration code that must be removed before the Cloudflare-only backend is deployable.
 
-## Current application features
+## Provisioned Cloudflare resources
 
-- Admin Studio, Camera Studio, Viewer, and server-managed LiveKit Egress template.
-- Host authentication and owner-scoped session API foundations.
-- Separate contributor and viewer access grants.
-- Camera monitor, programme preview, source selection, mute controls, and media uploads.
-- Private R2 storage integration and seven-day recording retention logic.
-- API-side contributor slot ceiling of 200 active cameras.
+- Private R2 bucket: `gozie-live-media`.
+- APAC D1 database: `gozie-live-db`.
+- D1 schema: `database/cloudflare-d1/0001_initial.sql` (applied).
 
-## Backend setup still required
+## Current limitations
 
-The frontend can be hosted independently, but working sign-in and live streaming require a Supabase project, LiveKit Cloud project with Ingress/Egress, API Worker secrets, and an API deployment. The private R2 bucket `gozie-live-media` has been provisioned; its S3 credentials still need to be configured for MP4 recording.
+The website is deployed as a preview, but this does not mean live broadcasting is operational. D1 binding and application migration, Cloudflare Realtime SFU setup, Durable Objects, R2 integration, the independent compositor, and end-to-end media testing remain.
 
-See [deployment plan](docs/deployment/plan.md) and [API setup](services/api/README.md).
+Read [the Cloudflare-only deployment plan](docs/deployment/plan.md).
 
 ## Local development
 
@@ -41,5 +43,3 @@ npm run dev
 npm run typecheck
 npm run build
 ```
-
-For local development, configure `VITE_BASE_PATH=/`, `VITE_API_BASE_URL`, and the Supabase public URL/key in `.env`.
