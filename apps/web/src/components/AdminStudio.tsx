@@ -36,6 +36,8 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
   const [creating, setCreating] = useState(false);
   const [shares, setShares] = useState<Shares | null>(null);
   const [monitor, setMonitor] = useState<Room | null>(null);
+  const [programMonitor, setProgramMonitor] = useState<Room | null>(null);
+  const [programRevision, setProgramRevision] = useState(0);
   const [revision, setRevision] = useState(0);
   const [feedPage, setFeedPage] = useState(0);
   const [selectedSource, setSelectedSource] = useState("");
@@ -64,10 +66,18 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
     return () => window.clearInterval(poll);
   }, [selectedId, refreshDetail, refreshSessions]);
   useEffect(() => {
-    return () => { void monitor?.disconnect(); };
-  }, [monitor]);
+    return () => { void monitor?.disconnect(); void programMonitor?.disconnect(); };
+  }, [monitor, programMonitor]);
 
   const participants = useMemo(() => monitor ? [...monitor.remoteParticipants.values()] : [], [monitor, revision]);
+  const programParticipants = useMemo(() => programMonitor ? [...programMonitor.remoteParticipants.values()] : [], [programMonitor, programRevision]);
+  const programParticipant = programParticipants[0];
+  const programmeVideo = programParticipant
+    ? [...programParticipant.videoTrackPublications.values()].find(publication => publication.track)?.track as RemoteTrack | undefined
+    : undefined;
+  const programmeAudio = programParticipant
+    ? [...programParticipant.audioTrackPublications.values()].find(publication => publication.track)?.track as RemoteTrack | undefined
+    : undefined;
   const feedPageSize = 12;
   const feedPageCount = Math.max(1, Math.ceil(participants.length / feedPageSize));
   const visibleParticipants = participants.slice(feedPage * feedPageSize, (feedPage + 1) * feedPageSize);
@@ -97,13 +107,25 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
     try {
       const tokens = await apiRequest<OwnerTokens>("/v1/sessions/"+selectedId+"/owner-tokens",{method:"POST"});
       await monitor?.disconnect();
+      await programMonitor?.disconnect();
       const room = new Room({adaptiveStream:true,dynacast:true});
+      const outputRoom = new Room({adaptiveStream:true,dynacast:true});
       room.on(RoomEvent.TrackSubscribed,()=>setRevision(value=>value+1));
       room.on(RoomEvent.TrackUnsubscribed,()=>setRevision(value=>value+1));
       room.on(RoomEvent.ParticipantConnected,()=>setRevision(value=>value+1));
       room.on(RoomEvent.ParticipantDisconnected,()=>setRevision(value=>value+1));
-      await room.connect(tokens.livekitUrl,tokens.monitorToken);
-      setMonitor(room); setMessage("Camera monitor connected. The programme engine is still a separate service.");
+      outputRoom.on(RoomEvent.TrackSubscribed,()=>setProgramRevision(value=>value+1));
+      outputRoom.on(RoomEvent.TrackUnsubscribed,()=>setProgramRevision(value=>value+1));
+      outputRoom.on(RoomEvent.ParticipantConnected,()=>setProgramRevision(value=>value+1));
+      outputRoom.on(RoomEvent.ParticipantDisconnected,()=>setProgramRevision(value=>value+1));
+      try {
+        await room.connect(tokens.livekitUrl,tokens.monitorToken);
+        await outputRoom.connect(tokens.livekitUrl,tokens.programToken);
+      } catch (connectionError) {
+        await room.disconnect(); await outputRoom.disconnect(); throw connectionError;
+      }
+      setMonitor(room); setProgramMonitor(outputRoom);
+      setMessage("Camera and programme monitors connected. A programme preview appears when the server renderer publishes output.");
     } catch(err) { setError(err instanceof Error ? err.message : "Monitor connection failed."); }
     finally { setBusy(false); }
   }
@@ -194,7 +216,13 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
             <div className="feed-grid">{visibleParticipants.map(participant=><FeedTile key={participant.identity} participant={participant} selected={selectedSource===participant.identity} onSelect={identity=>{setSelectedSource(identity);void command("select-source",{participantIdentity:identity});}}/>)}</div>
             {participants.length > feedPageSize && <div className="feed-pagination"><span>Showing {feedPage*feedPageSize+1}–{Math.min((feedPage+1)*feedPageSize,participants.length)} of {participants.length} feeds</span><div><button className="secondary-button" disabled={feedPage===0} onClick={()=>setFeedPage(page=>Math.max(0,page-1))}>Previous</button><button className="secondary-button" disabled={feedPage>=feedPageCount-1} onClick={()=>setFeedPage(page=>Math.min(feedPageCount-1,page+1))}>Next</button></div></div>}
           </> : <div className="empty-grid"><div className="empty-icon"><Video size={26}/></div><h3>No camera previews currently connected</h3><p>Invite contributors and connect the camera monitor. LiveKit must be configured for real feeds to arrive.</p></div>}
-          <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PROGRAMME OUTPUT</span><h3>Production controls</h3></div><span className={detail?.mediaEngine==="running"?"live-tag":"draft-tag"}>{(detail?.mediaEngine ?? "not-started").toUpperCase()}</span></div>
+          <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PROGRAMME OUTPUT</span><h3>Final programme preview</h3></div><span className={programmeVideo?"live-tag":"draft-tag"}>{programmeVideo?"OUTPUT RECEIVED":"AWAITING OUTPUT"}</span></div>
+            <div className="programme-monitor">
+              {programmeVideo ? <TrackRenderer track={programmeVideo} label="Final programme video"/> : <div className="programme-monitor-empty"><MonitorPlay size={28}/><b>No programme video received</b><span>Connect the monitor and start the server-side Egress pipeline to preview the viewer output.</span></div>}
+              {programmeAudio && <TrackRenderer track={programmeAudio} label="Final programme audio"/>}
+            </div>
+          </section>
+          <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PRODUCTION CONTROLS</span><h3>Programme controls</h3></div><span className={detail?.mediaEngine==="running"?"live-tag":"draft-tag"}>{(detail?.mediaEngine ?? "not-started").toUpperCase()}</span></div>
             <div className="production-grid">
               <div><b>Selected source</b><p>{selectedSource || "No camera selected"}</p><small>Selection is saved as a production command; no final switch is applied until the engine is running.</small></div>
               <div><b>Contributor audio</b><p>Mute commands can be queued for the media engine.</p><div className="mix-actions"><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:true})}><VolumeX size={15}/> Mute all</button><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:false})}><Mic size={15}/> Unmute all</button></div></div>
