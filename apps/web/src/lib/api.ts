@@ -1,6 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 const apiBase = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8787").replace(/\/$/, "");
+export const apiUrl = (path: string) => apiBase + path;
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
 let client: SupabaseClient | null = null;
@@ -19,7 +20,7 @@ export async function apiRequest<T>(path: string, init: RequestInit = {}): Promi
   const auth = await getSupabase()?.auth.getSession();
   const accessToken = auth?.data.session?.access_token;
   if (accessToken) headers.set("authorization", "Bearer " + accessToken);
-  const response = await fetch(apiBase + path, { ...init, headers });
+  const response = await fetch(apiUrl(path), { ...init, headers });
   const contentType = response.headers.get("content-type") || "";
   const data = contentType.includes("application/json") ? await response.json() : await response.text();
   if (!response.ok) {
