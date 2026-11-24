@@ -263,11 +263,35 @@ async function handle(req:Request,env:Env):Promise<Response>{
   }
  }
  if(path==="/v1/public/session"&&method==="GET"){
-  const s=await byCode(env,url.searchParams.get("code")||"","viewer"),recs=await env.DB.prepare("SELECT id,expires_at,size_bytes FROM recordings WHERE session_id=? AND deleted_at IS NULL AND expires_at>?").bind(s.id,now()).all();return json({session:{id:s.id,title:s.title,status:s.status,scheduled_at:s.scheduled_at,ended_at:s.ended_at},recordings:recs.results,programmeAvailable:Boolean(s.programme_uid)});
+  const s=await byCode(env,url.searchParams.get("code")||"","viewer");
+  const recs=await env.DB.prepare("SELECT id,provider_type,status,expires_at,size_bytes FROM recordings WHERE session_id=? AND deleted_at IS NULL AND expires_at>? ORDER BY created_at DESC").bind(s.id,now()).all();
+  return json({session:{id:s.id,title:s.title,status:s.status,scheduled_at:s.scheduled_at,ended_at:s.ended_at},recordings:recs.results,programmeAvailable:Boolean(s.playback_url),playbackUrl:s.playback_url});
  }
  if(path==="/v1/recordings/download"&&method==="GET"){
-  const u=await auth(req,env),rid=url.searchParams.get("id")||"",r=await env.DB.prepare("SELECT rec.object_key FROM recordings rec JOIN broadcast_sessions s ON s.id=rec.session_id WHERE rec.id=? AND s.owner_id=? AND rec.deleted_at IS NULL AND rec.expires_at>?").bind(rid,u.id,now()).first<{object_key:string}>();if(!r)return fail("Recording unavailable.",404);
-  const obj=await env.MEDIA_BUCKET.get(r.object_key);if(!obj?.body)return fail("Recording file missing.",404);return new Response(obj.body,{headers:{"content-type":"video/mp4","content-disposition":"attachment","cache-control":"private,no-store"}});
+  const u=await auth(req,env),rid=url.searchParams.get("id")||"";
+  const row=await env.DB.prepare("SELECT rec.provider_type,rec.provider_recording_id,rec.object_key FROM recordings rec JOIN broadcast_sessions s ON s.id=rec.session_id WHERE rec.id=? AND s.owner_id=? AND rec.deleted_at IS NULL AND rec.expires_at>?").bind(rid,u.id,now()).first<{provider_type:string;provider_recording_id:string|null;object_key:string}>();
+  if(!row)return fail("Recording unavailable or expired.",404);
+  if(row.provider_type==="realtimekit"&&row.provider_recording_id){
+   const details=await realtimeKit(env,"/recordings/"+encodeURIComponent(row.provider_recording_id),"GET");
+   if(!details.download_url)return fail("Recording is still being processed. Try again later.",409);
+   const target=new URL(details.download_url);if(target.protocol!=="https:")return fail("Recording download URL is invalid.",502);
+   return Response.redirect(target.toString(),302);
+  }
+  const obj=await env.MEDIA_BUCKET.get(row.object_key);if(!obj?.body)return fail("Recording file missing.",404);
+  return new Response(obj.body,{headers:{"content-type":"video/mp4","content-disposition":"attachment","cache-control":"private,no-store"}});
+ }
+ if(path==="/v1/public/recordings/download"&&method==="GET"){
+  const session=await byCode(env,url.searchParams.get("code")||"","viewer"),rid=url.searchParams.get("id")||"";
+  const row=await env.DB.prepare("SELECT provider_type,provider_recording_id,object_key FROM recordings WHERE id=? AND session_id=? AND deleted_at IS NULL AND expires_at>?").bind(rid,session.id,now()).first<{provider_type:string;provider_recording_id:string|null;object_key:string}>();
+  if(!row)return fail("Recording unavailable or expired.",404);
+  if(row.provider_type==="realtimekit"&&row.provider_recording_id){
+   const details=await realtimeKit(env,"/recordings/"+encodeURIComponent(row.provider_recording_id),"GET");
+   if(!details.download_url)return fail("Recording is still being processed. Try again later.",409);
+   const target=new URL(details.download_url);if(target.protocol!=="https:")return fail("Recording download URL is invalid.",502);
+   return Response.redirect(target.toString(),302);
+  }
+  const obj=await env.MEDIA_BUCKET.get(row.object_key);if(!obj?.body)return fail("Recording file missing.",404);
+  return new Response(obj.body,{headers:{"content-type":"video/mp4","content-disposition":"attachment","cache-control":"private,no-store"}});
  }
  return fail("Not found.",404);
 }
