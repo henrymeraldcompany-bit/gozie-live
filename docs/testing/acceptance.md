@@ -4,13 +4,14 @@
 - Production Worker responds to `GET /health`.
 - `/gozie-live/` serves the built application rather than the GitHub repository README.
 - D1 and R2 bindings are visible to the Worker.
-- No Supabase or LiveKit packages or secrets are needed.
+- No Supabase or LiveKit packages or secrets are required.
 
 ## Accounts and sessions
-- Host can register only when Cloudflare Email Service sending is configured.
-- Six-digit email verification expires, rate limits attempts and cannot be replayed.
-- Verified host can sign in/out and create/schedule sessions.
+- New host can create an account with a unique email address and password of at least 10 characters.
+- Passwords are stored as PBKDF2 hashes and are never returned to the browser.
+- Host can sign in, sign out and create/schedule sessions.
 - Contributor and viewer links are different and cannot cross roles.
+- Expired/revoked sessions are rejected. Password recovery remains an outstanding feature.
 
 ## Camera and programme
 - Contributor phone can publish camera and microphone to Cloudflare Realtime SFU.
