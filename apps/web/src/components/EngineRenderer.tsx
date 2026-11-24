@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Room, RoomEvent, Track } from "livekit-client";
+import { Room, RoomEvent } from "livekit-client";
 import type { RemoteTrack } from "livekit-client";
 import { apiUrl } from "../lib/api";
 
