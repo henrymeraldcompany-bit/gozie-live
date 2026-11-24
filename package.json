@@ -8,5 +8,5 @@
     "build": "npm run build --workspace @gozie-live/web",
     "typecheck": "npm run typecheck --workspace @gozie-live/web"
   },
-  "engines": { "node": ">=20" }
+  "engines": { "node": ">=22.22" }
 }
