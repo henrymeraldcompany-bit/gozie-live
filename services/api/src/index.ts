@@ -139,6 +139,19 @@ async function handle(req:Request,env:Env):Promise<Response>{
    throw error;
   }
  }
+
+ if(path==="/v1/join/viewer"&&method==="POST"){
+  const x=await input<{code?:string}>(req),s=await byCode(env,x.code||"","viewer"),presenceId=uuid(),identity="viewer-"+uuid();
+  await env.DB.prepare("INSERT INTO viewer_presence(id,session_id,identity,created_at,last_seen_at,expires_at) VALUES(?,?,?, ?,?,?)").bind(presenceId,s.id,identity,now(),now(),new Date(Date.now()+60000).toISOString()).run();
+  return json({presenceId,session:{id:s.id,title:s.title,status:s.status},playbackUrl:s.playback_url,programmeAvailable:Boolean(s.playback_url)});
+ }
+ if(path==="/v1/viewer/heartbeat"&&method==="POST"){
+  const x=await input<{code?:string;presenceId?:string}>(req),s=await byCode(env,x.code||"","viewer");
+  if(!x.presenceId)return fail("Viewer presence ID is required.");
+  const updated=await env.DB.prepare("UPDATE viewer_presence SET last_seen_at=?,expires_at=? WHERE id=? AND session_id=?")
+   .bind(now(),new Date(Date.now()+60000).toISOString(),x.presenceId,s.id).run();
+  return json({ok:true});
+ }
  if(path==="/v1/contributors/presence"&&method==="POST"){
   const x=await input<{contributorId:string;leaveSecret:string;leave?:boolean}>(req),c=await env.DB.prepare("SELECT id,session_id,leave_secret_hash,realtimekit_participant_id FROM contributors WHERE id=?").bind(x.contributorId).first<{id:string;session_id:string;leave_secret_hash:string;realtimekit_participant_id:string|null}>();
   if(!c||!equal(c.leave_secret_hash,await hash(x.leaveSecret||"")))return fail("Invalid contributor presence credentials.",403);
@@ -175,8 +188,9 @@ async function handle(req:Request,env:Env):Promise<Response>{
    let livestreamId=session.realtimekit_livestream_id||"",playbackUrl=session.playback_url||"";
    if(!livestreamId){
     const stream=await realtimeKit(env,"/meetings/"+encodeURIComponent(meetingId)+"/livestreams","POST",{name:"gozie-live-"+session.public_id,video_config:{width:1280,height:720}});
-    if(!stream.id||!stream.playback_url)throw new Error("RealtimeKit did not return a livestream playback URL.");
-    livestreamId=stream.id;playbackUrl=stream.playback_url;
+    const streamInfo=stream.livestream||stream;
+    if(!streamInfo.id||!streamInfo.playback_url)throw new Error("RealtimeKit did not return a livestream playback URL.");
+    livestreamId=streamInfo.id;playbackUrl=streamInfo.playback_url;
     await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_livestream_id=?,playback_url=? WHERE id=?").bind(livestreamId,playbackUrl,session.id).run();
    }
    const token=await ensureHostParticipant(env,{...session,realtimekit_meeting_id:meetingId},user);
@@ -201,12 +215,13 @@ async function handle(req:Request,env:Env):Promise<Response>{
     audio_config:{channel:"stereo",codec:"AAC",export_file:false},
     file_name_prefix:"gozie-live-"+session.public_id
    });
-   if(!recording.id)throw new Error("RealtimeKit did not return a recording ID.");
-   const recordingId=uuid(),futureExpiry="2099-12-31T23:59:59.999Z",objectKey="realtimekit:"+recording.id;
+   const recordingInfo=recording.recording||recording;
+   if(!recordingInfo.id)throw new Error("RealtimeKit did not return a recording ID.");
+   const providerRecordingId=recordingInfo.id,recordingId=uuid(),futureExpiry="2099-12-31T23:59:59.999Z",objectKey="realtimekit:"+providerRecordingId;
    await env.DB.prepare("INSERT INTO recordings(id,session_id,object_key,created_at,expires_at,provider_type,provider_recording_id,download_url,status) VALUES(?,?,?,?,?,'realtimekit',?,?,?)")
-    .bind(recordingId,session.id,objectKey,now(),futureExpiry,recording.id,recording.download_url||null,recording.status||"INVOKED").run();
-   await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_recording_id=? WHERE id=?").bind(recording.id,session.id).run();
-   return json({recordingId:recording.id,status:recording.status||"INVOKED",message:"Composite recording has been requested from RealtimeKit."},202);
+    .bind(recordingId,session.id,objectKey,now(),futureExpiry,recording.id,recordingInfo.download_url||null,recordingInfo.status||"INVOKED").run();
+   await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_recording_id=? WHERE id=?").bind(providerRecordingId,session.id).run();
+   return json({recordingId:providerRecordingId,status:recordingInfo.status||"INVOKED",message:"Composite recording has been requested from RealtimeKit."},202);
   }
   if(action==="recording/stop"&&method==="POST"){
    if(!session.realtimekit_recording_id)return fail("There is no recording to stop.",404);
@@ -325,8 +340,11 @@ export default {
   }catch(e){if(e instanceof Response)return e;return json({error:e instanceof Error?e.message:"Unexpected server error."},500);}
  },
  async scheduled(_controller:unknown,env:Env){
-  const rows=await env.DB.prepare("SELECT id,object_key FROM recordings WHERE expires_at<=? AND deleted_at IS NULL LIMIT 100").bind(now()).all<{id:string;object_key:string}>();
-  for(const r of rows.results){await env.MEDIA_BUCKET.delete(r.object_key);await env.DB.prepare("UPDATE recordings SET deleted_at=? WHERE id=?").bind(now(),r.id).run();}
+  const rows=await env.DB.prepare("SELECT id,object_key,provider_type FROM recordings WHERE expires_at<=? AND deleted_at IS NULL LIMIT 100").bind(now()).all<{id:string;object_key:string;provider_type:string}>();
+  for(const r of rows.results){
+   if(r.provider_type!=="realtimekit")await env.MEDIA_BUCKET.delete(r.object_key);
+   await env.DB.prepare("UPDATE recordings SET deleted_at=?,status='expired' WHERE id=?").bind(now(),r.id).run();
+  }
   await env.DB.prepare("DELETE FROM auth_sessions WHERE expires_at<=?").bind(now()).run();
   await env.DB.prepare("DELETE FROM viewer_presence WHERE expires_at<=?").bind(now()).run();
  }
