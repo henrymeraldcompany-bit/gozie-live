@@ -11,7 +11,7 @@ type Session = { id: string; title: string; status: string; scheduled_at: string
 type Contributor = { id: string; display_name: string; status: string; audio_muted: boolean; provider_identity?: string | null };
 type Asset = { id: string; asset_kind: string; content_type: string; file_name?: string };
 type Recording = { id: string; created_at: string; expires_at: string; size_bytes: number | null; deleted_at: string | null };
-type SessionDetail = { session: Session; contributors: Contributor[]; assets: Asset[]; recordings: Recording[]; viewerCount: number; mediaEngine: string };
+type SessionDetail = { session: Session; contributors: Contributor[]; assets: Asset[]; recordings: Recording[]; viewerCount: number; mediaEngine: string; engine?: { last_error?: string | null } | null };
 type Shares = { contributorUrl: string; viewerUrl: string };
 type OwnerTokens = { livekitUrl: string; monitorToken: string; programToken: string; mediaEngine: string };
 
@@ -182,7 +182,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
     <section className="main-area">
       <header className="topbar">
         <div><div className="eyebrow">GOZIE LIVE / CONTROL ROOM</div><h1>Admin Studio</h1></div>
-        <div className="top-actions"><span className="status-pill"><span className="dot"/> API connected when configured</span><button className="icon-button" aria-label="Help"><CircleHelp size={19}/></button><button className="avatar" title="Sign out" onClick={()=>void getSupabase()?.auth.signOut()}><LogOut size={16}/></button></div>
+        <div className="top-actions"><span className="status-pill"><span className="dot"/> Studio API connected</span><button className="icon-button" aria-label="Help"><CircleHelp size={19}/></button><button className="avatar" title="Sign out" onClick={()=>void getSupabase()?.auth.signOut()}><LogOut size={16}/></button></div>
       </header>
       <div className="content">
         <div className="welcome-row"><div><h2>Your broadcast, in one place.</h2><p>Create a session, invite camera contributors, then manage the production.</p></div></div>
@@ -202,7 +202,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
               <div className="session-meta"><span><Users size={15}/>{contributors.filter(person=>person.status==="connected" || person.status==="publishing").length} active contributors</span><span><Eye size={15}/>{detail?.viewerCount ?? 0} viewers</span><span><Activity size={15}/>{detail?.mediaEngine==="running"?"Engine running":detail?.mediaEngine==="failed"?"Engine failed":"Engine not started"}</span></div>
               <div className="action-row">
                 <button className="secondary-button" onClick={()=>void generateLinks()}>Generate share links</button>
-                {activeSession.status!=="ended" && <button className="primary-button" onClick={()=>void sessionAction(isLive?"end":"start")}>{isLive?"End session":"Mark session live"}</button>}
+                {activeSession.status!=="ended" && <button className="primary-button" onClick={()=>void sessionAction(isLive?"end":"start")}>{isLive?"End broadcast":"Start broadcast"}</button>}
               </div>
             </>:<p className="muted">Create your first broadcast to see its controls here.</p>}
           </section>
@@ -224,6 +224,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
               {programmeVideo ? <TrackRenderer track={programmeVideo} label="Final programme video"/> : <div className="programme-monitor-empty"><MonitorPlay size={28}/><b>No programme video received</b><span>Connect the monitor and start the server-side Egress pipeline to preview the viewer output.</span></div>}
               {programmeAudio && <TrackRenderer track={programmeAudio} label="Final programme audio"/>}
             </div>
+            {detail?.engine?.last_error && <div className="inline-error">LiveKit Egress: {detail.engine.last_error}</div>}
           </section>
           <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PRODUCTION CONTROLS</span><h3>Programme controls</h3></div><span className={detail?.mediaEngine==="running"?"live-tag":"draft-tag"}>{(detail?.mediaEngine ?? "not-started").toUpperCase()}</span></div>
             <div className="production-grid">
