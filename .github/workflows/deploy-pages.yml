@@ -56,8 +56,11 @@ jobs:
       - name: Upload the compiled website
         uses: actions/upload-pages-artifact@v4
         with:
+          name: gozie-live-pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: apps/web/dist
 
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: gozie-live-pages-${{ github.run_id }}-${{ github.run_attempt }}
