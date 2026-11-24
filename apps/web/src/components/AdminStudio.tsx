@@ -1,5 +1,5 @@
 import {useCallback,useEffect,useMemo,useRef,useState} from "react";
-import {Activity,Camera,Copy,LogOut,Mic,MicOff,MonitorPlay,Radio,Share2,Upload,Users,Video,VideoOff} from "lucide-react";
+import {Activity,Camera,Copy,LogOut,Mic,MicOff,MonitorPlay,Radio,Share2,Upload,Users,Video} from "lucide-react";
 import {QRCodeSVG} from "qrcode.react";
 import {apiRequest} from "../lib/api";
 import {createPeerConnection,waitForIce} from "../lib/realtime";
