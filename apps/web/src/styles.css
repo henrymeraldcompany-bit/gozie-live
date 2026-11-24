@@ -15,3 +15,9 @@
 .engine-lower-third b{font:600 28px 'Space Grotesk',sans-serif}
 .engine-audio-bus,.engine-audio-track,.engine-imported-audio{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;overflow:hidden}
 .engine-status{position:absolute;right:35px;top:25px;max-width:500px;padding:10px 14px;background:#3a2024dd;color:#ffd0d0;font-size:12px}
+
+.programme-monitor{height:260px;position:relative;overflow:hidden;border-radius:9px;background:#03070c;border:1px solid #263441;display:grid;place-items:center}
+.programme-monitor video{width:100%;height:100%;object-fit:contain}
+.programme-monitor-empty{display:flex;flex-direction:column;align-items:center;gap:9px;text-align:center;color:#62768b;padding:18px}
+.programme-monitor-empty b{font:600 13px 'Space Grotesk';color:#d9e4ef}
+.programme-monitor-empty span{font-size:10px;line-height:1.5;max-width:450px;color:#8495a9}
