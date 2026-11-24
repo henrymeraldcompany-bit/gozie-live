@@ -2,6 +2,10 @@ name = "gozie-live-api"
 main = "src/index.ts"
 compatibility_date = "2026-11-24"
 
+[vars]
+APP_ORIGIN = "https://henrymeraldcompany-bit.github.io"
+APP_BASE_PATH = "/gozie-live/"
+
 [[r2_buckets]]
 binding = "MEDIA_BUCKET"
 bucket_name = "gozie-live-media"

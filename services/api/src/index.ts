@@ -15,6 +15,7 @@ interface Env {
   LIVEKIT_API_KEY: string;
   LIVEKIT_API_SECRET: string;
   APP_ORIGIN: string;
+  APP_BASE_PATH: string;
   ENGINE_SHARED_SECRET: string;
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
@@ -39,6 +40,18 @@ const randomCode = () => {
   const bytes = crypto.getRandomValues(new Uint8Array(24));
   return b64url(bytes);
 };
+function appBaseUrl(env: Env): URL {
+  const configuredPath = (env.APP_BASE_PATH || "/").trim();
+  const leading = configuredPath.startsWith("/") ? configuredPath : "/" + configuredPath;
+  const normalized = leading.endsWith("/") ? leading : leading + "/";
+  return new URL(normalized, env.APP_ORIGIN);
+}
+function appUrl(env: Env, params: Record<string, string>): string {
+  const target = appBaseUrl(env);
+  target.search = new URLSearchParams(params).toString();
+  return target.toString();
+}
+
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", encoder.encode(value));
   return [...new Uint8Array(digest)].map((part) => part.toString(16).padStart(2, "0")).join("");
@@ -196,7 +209,7 @@ async function startBroadcastEngine(env: Env, session: SessionRow): Promise<Reco
     );
     ingressId = ingress.ingress_id;
     if (!ingress.url || !ingress.stream_key) throw new Error("LiveKit returned an incomplete RTMP ingress configuration.");
-    const templateUrl = new URL("/", env.APP_ORIGIN);
+    const templateUrl = appBaseUrl(env);
     templateUrl.searchParams.set("mode", "engine");
     templateUrl.searchParams.set("sessionId", session.id);
     templateUrl.searchParams.set("controlCode", controlCode);
@@ -342,8 +355,8 @@ async function handle(request: Request, env: Env): Promise<Response> {
       session,
       contributorCode,
       viewerCode,
-      contributorUrl: new URL("/?mode=camera&code=" + encodeURIComponent(contributorCode), env.APP_ORIGIN).toString(),
-      viewerUrl: new URL("/?mode=viewer&code=" + encodeURIComponent(viewerCode), env.APP_ORIGIN).toString()
+      contributorUrl: appUrl(env, { mode: "camera", code: contributorCode }),
+      viewerUrl: appUrl(env, { mode: "viewer", code: viewerCode })
     }, 201);
   }
   const joinContributor = path === "/v1/join/contributor";

@@ -6,6 +6,15 @@
 - Private R2 bucket: `gozie-live-media` (APAC location hint, Standard storage).
 - Bucket is not publicly exposed. No credentials or API tokens are stored in GitHub.
 
+## Website deployment
+
+- Frontend source: `apps/web`.
+- GitHub Pages deployment workflow: `.github/workflows/deploy-pages.yml`.
+- Expected website: https://henrymeraldcompany-bit.github.io/gozie-live/
+- Vite is configured to use the Pages base path provided by `actions/configure-pages`.
+- Set repository Actions variables `GOZIE_LIVE_API_URL`, `GOZIE_LIVE_SUPABASE_URL`, and `GOZIE_LIVE_SUPABASE_ANON_KEY` before expecting host sign-in and session management to work.
+- If the Pages workflow reports that the Pages source is not configured for Actions, switch Repository Settings → Pages → Build and deployment → Source to **GitHub Actions** once.
+
 ## Implemented repository components
 
 - React/Vite frontend with Admin Studio, Camera Studio, Viewer and Egress composition mode.
@@ -22,7 +31,6 @@
 - R2 S3 API credentials: not created. The existing private bucket exists, but Egress recording is disabled until its S3 keys and endpoint are set as Worker secrets.
 - Worker secrets: not configured.
 - Cloudflare API Worker: not deployed.
-- Web static-asset Worker: deploy configuration is committed, but the frontend is not deployed.
 - End-to-end broadcast, recording upload, viewer playback, and deletion test: pending.
 - Capacity tests through 200 contributors and independent viewer-load tests: pending.
 
@@ -31,10 +39,11 @@
 1. Create/configure Supabase; apply the four SQL migrations in order.
 2. Create/configure LiveKit Cloud; capture its WebSocket URL, API key and secret.
 3. Create an R2 S3 API key with write access to the private bucket.
-4. Build and deploy the frontend with `VITE_API_BASE_URL`, `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`.
-5. Set API Worker secrets: Supabase values, LiveKit values, `APP_ORIGIN`, `ENGINE_SHARED_SECRET`, and the R2 S3 values.
-6. Deploy the API Worker. Confirm `GET /health` before running an end-to-end test.
-7. Create a test session; verify camera publish-only permissions, Egress renderer connection, RTMP programme ingress, viewer subscribe-only permissions, MP4 upload, download, and seven-day cleanup.
+4. Add the three public frontend variables to GitHub repository Settings → Secrets and variables → Actions → Variables.
+5. The Pages workflow builds and deploys the frontend automatically on pushes to `main`.
+6. Set API Worker secrets: Supabase values, LiveKit values, `ENGINE_SHARED_SECRET`, and the R2 S3 values.
+7. Deploy the API Worker. Confirm `GET /health` before running an end-to-end test.
+8. Create a test session; verify camera publish-only permissions, Egress renderer connection, RTMP programme ingress, viewer subscribe-only permissions, MP4 upload, download, and seven-day cleanup.
 
 ## Retention behaviour
 
