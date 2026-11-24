@@ -1,0 +1,10 @@
+name = "gozie-live-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-24"
+
+[[r2_buckets]]
+binding = "MEDIA_BUCKET"
+bucket_name = "gozie-live-media"
+
+[triggers]
+crons = ["0 * * * *"]

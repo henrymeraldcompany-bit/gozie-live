@@ -6,17 +6,24 @@
 - Private R2 bucket: `gozie-live-media` (APAC location hint, Standard storage).
 - Bucket is not publicly exposed. No credentials or API tokens are stored in GitHub.
 
-The R2 bucket is provisioned for future uploaded media and final programme recordings. Upload/download access still needs to be implemented through authenticated, short-lived signed requests. Seven-day deletion must be scheduled relative to each session's end time by a trusted backend; no blanket bucket lifecycle expiry has been applied.
+## Implemented repository foundations
 
-## Planned separation
+- Cloudflare Worker API source, Wrangler configuration, R2 binding, and hourly cleanup handler are committed.
+- API source includes Supabase Auth verification, owner-scoped session endpoints, separate contributor/programme LiveKit token grants, R2 asset upload, viewer heartbeat, recording metadata, and production-command queue.
+- Database migrations include ownership policies, contributor metadata, production command queue, and viewer-presence records.
+- Frontend work is being connected to these API contracts.
 
-- Web frontend: Cloudflare Workers with Static Assets.
-- API and scheduled jobs: Cloudflare Workers or a dedicated backend.
-- Database: Supabase Postgres (not provisioned).
-- Uploads and recordings: Cloudflare R2 (bucket provisioned; app integration pending).
-- Real-time media: LiveKit Cloud initially; evaluate self-hosting only after operational capacity is understood.
-- Production compositor/mixer: dedicated compute service sized through benchmarks.
+## Still requiring external configuration or implementation
 
-## Deployment status
+- Supabase project and migrations: not provisioned.
+- LiveKit project: not provisioned.
+- Worker secrets and API deployment: not configured or deployed.
+- Web frontend: not deployed.
+- Independent production compositor/mixer: not implemented or deployed.
+- Automated recording, playback and end-to-end deletion: not tested against a live media engine.
 
-The frontend has not yet been deployed. No Worker, database, LiveKit project, media engine, or CI deployment secret is configured. Do not commit credentials. Configure secrets in provider secret managers only.
+## Retention behaviour
+
+Recording deletion is scheduled hourly by the Worker and calculated from each session's end time plus seven days. No blanket R2 lifecycle expiry is configured, because that would incorrectly measure retention from upload time.
+
+Never commit service-role keys, LiveKit secrets, or the engine shared secret.

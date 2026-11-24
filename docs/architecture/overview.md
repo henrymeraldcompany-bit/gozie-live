@@ -1,27 +1,33 @@
 # GOZIE LIVE architecture
 
-## Main flow
+## Media flow
 
-1. Admin authenticates and creates a broadcast session.
-2. API creates separate contributor and viewer entry points and issues role-scoped, short-lived media tokens.
-3. Contributor devices publish camera and microphone tracks to the SFU.
-4. Admin receives monitor previews and sends programme-source/audio-control commands to the server-side production engine.
-5. The engine produces one final programme stream and publishes it to viewers while recording that same output.
-6. A trusted scheduled cleanup deletes recording objects and metadata seven days after the session ends.
+1. Admin authenticates through Supabase Auth and creates a session in the API.
+2. The API returns two independent share links: contributor and viewer.
+3. Each contributor receives a short-lived LiveKit token restricted to publishing in the contributor room, without subscribing to other cameras.
+4. Admin receives subscribe-only access to the contributor room for monitoring.
+5. A separately hosted production engine subscribes to contributor inputs, processes source/audio commands, composites one final programme, and publishes it to a separate programme room.
+6. Viewers receive subscribe-only tokens for the programme room. They cannot publish and cannot join the raw contributor room.
+7. The engine records the same final programme output. After session end, the recording is available until seven days after the recorded end time.
+8. An hourly trusted Worker job deletes expired recording objects from private R2 storage and marks their rows deleted.
 
 ## Components
 
 - Web app: Admin Studio, Camera Studio, Viewer.
-- API: authentication, session and role authorization, tokens, asset metadata, recording lifecycle.
-- SFU: WebRTC ingest and track distribution (LiveKit is the initial candidate).
-- Production engine: server-side video switching/compositing, audio mixing, programme output, recording.
-- PostgreSQL: sessions, contributors, media assets, recording metadata.
-- Object storage: uploaded media and final recordings.
+- API: authentication, session lifecycle, token issuance, R2 media assets, viewer presence, production command queue, recording metadata.
+- SFU: LiveKit (project still needs provisioning).
+- Production engine: dedicated media compositor/mixer and recorder (not yet implemented).
+- PostgreSQL: sessions, contributors, media assets, production commands, viewer presence and recording metadata (Supabase project still needs provisioning).
+- Object storage: private Cloudflare R2 bucket provisioned as `gozie-live-media`.
 
-## Important constraints
+## Security boundaries
 
-The admin browser is a control surface, not the media server. The media engine must own the broadcast lifecycle. Camera capture can still be suspended by mobile operating systems when a contributor backgrounds or locks their phone.
+Viewer tokens can subscribe only and use the dedicated programme room. Contributor tokens can publish only to the contributor room and cannot subscribe. The admin receives monitor access to the contributor room and subscribe access to the programme room. Service secrets stay in Worker secrets, not browser variables or Git.
 
-A 100–200 camera target requires progressive load tests and capacity planning. Admin monitoring should use low-resolution previews and pagination; displaying 200 full-resolution feeds simultaneously is not a realistic phone workload. Viewer capacity is a separate scaling dimension.
+The API verifies the admin JWT with Supabase Auth before using server-side database credentials. Public share codes are high-entropy bearer links; anyone who receives a contributor link can publish to that session, so links should be shared only with intended contributors.
 
-Do not promise zero latency. Measure contributor-to-preview and source-switch-to-viewer latency on representative devices and networks.
+## Reliability and capacity
+
+The admin browser is a control surface, not the media server. The production engine must own the broadcast lifecycle and be supervised independently. Camera capture can still be suspended by mobile operating systems when a contributor backgrounds or locks their phone.
+
+A 100–200 camera target requires progressive load tests. Admin monitoring should use low-resolution previews and pagination; displaying 200 full-resolution feeds simultaneously is not a realistic phone workload. Viewer capacity is a separate scaling dimension. Do not promise zero latency; measure source-to-preview and source-switch-to-viewer delay on representative networks.

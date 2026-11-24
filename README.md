@@ -1,24 +1,22 @@
 # GOZIE LIVE
 
-Multi-camera live streaming and broadcast production platform.
+A multi-camera live streaming and broadcast-production platform.
 
-## Project status
+## Current status
 
-This repository currently contains the project foundation and a starter web interface. It is **not yet a production streaming service**. Live camera ingest, SFU routing, server-side program switching/mixing, viewer delivery, recording, and retention cleanup must be implemented and load-tested before public broadcasts.
+The repository now contains an interactive React studio, a Cloudflare Worker API foundation, role-scoped LiveKit token issuance, a Supabase database migration set, private R2 asset storage integration, viewer presence, production command queueing, and seven-day recording cleanup logic.
+
+**This is not yet a complete production broadcast service.** Supabase and LiveKit projects have not been provisioned, the Worker is not deployed, and the independent media engine that composites/mixes/publishes the final programme is not yet implemented. The viewer programme room remains offline until that engine is running.
 
 ## Product surfaces
 
-- **Admin Studio** — create sessions, manage contributors, select the program source, control audio/media, monitor viewers, and manage recordings.
-- **Camera Studio** — contributors join using a session link, enter a display name, grant camera/microphone permissions, and publish their feeds.
-- **Viewer** — audiences watch only the final program output.
-
-## Architecture
-
-See [docs/architecture/overview.md](docs/architecture/overview.md). The intended design uses a WebRTC SFU (LiveKit initially), a server-side production engine, an API, a database, and object storage. The production engine must continue independently of the admin browser.
+- **Admin Studio** — authenticate, create sessions, share contributor/viewer links, monitor feeds, upload media, and queue production controls.
+- **Camera Studio** — contributors join with a session-specific link and publish camera/microphone tracks.
+- **Viewer** — audience members subscribe only to the final programme room.
 
 ## Development
 
-Requirements: Node.js 20+ and npm 10+.
+Requirements: Node.js 22.22+ and npm.
 
 ```bash
 npm install
@@ -27,17 +25,8 @@ npm run typecheck
 npm run build
 ```
 
-Copy `.env.example` to `.env` for local configuration. Never commit credentials or real tokens.
+Copy `.env.example` to `.env`. Apply database migrations in order. See [API setup](services/api/README.md) and [deployment plan](docs/deployment/plan.md). Never commit credentials.
 
-## Repository layout
+## Capacity
 
-- `apps/web` — React + TypeScript web application
-- `services/api` — API service foundation
-- `services/media-engine` — server-side production engine design and integration boundary
-- `database/migrations` — SQL schema migrations
-- `packages/shared-types` — shared domain types
-- `docs` — architecture, security, deployment, and testing notes
-
-## Capacity and reliability
-
-The target of 100–200 camera contributors is a design and load-testing target, not a guarantee. Capacity depends on SFU configuration, media bitrate, server resources, network conditions, and viewer count. Test progressively before production use.
+100–200 contributors is a target that must be validated with real SFU and media-engine load tests. Viewer capacity is separate. Start with small tests and increase progressively while measuring CPU/GPU, memory, bandwidth, packet loss, publish success, latency, audio quality, recording and reconnect behaviour.
