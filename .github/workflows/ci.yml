@@ -14,8 +14,26 @@ jobs:
           node-version: 24
       - run: npm install
       - run: npm run typecheck
-      - run: npm run build
-      - name: Validate API Worker bundle
+      - name: Build production website
+        run: npm run build
+        env:
+          VITE_BASE_PATH: /gozie-live/
+      - name: Compile Cloudflare API Worker module
+        run: npx tsc -p services/api/tsconfig.json --noEmit false --outDir services/api/build
+      - name: Assemble Cloudflare deployment artifact
+        run: |
+          mkdir -p cloudflare-deploy/worker cloudflare-deploy/assets
+          cp services/api/build/index.js cloudflare-deploy/worker/index.js
+          cp apps/web/dist/index.html cloudflare-deploy/assets/index.html
+          cp -R apps/web/dist/assets cloudflare-deploy/assets/assets
+      - name: Upload Cloudflare deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gozie-live-cloudflare-\${{ github.sha }}
+          path: cloudflare-deploy
+          if-no-files-found: error
+          retention-days: 7
+      - name: Validate API Worker configuration
         run: npx wrangler deploy --dry-run --config services/api/wrangler.toml
-      - name: Validate static web Worker assets
+      - name: Validate static web Worker configuration
         run: npx wrangler deploy --dry-run --config apps/web/wrangler.toml
