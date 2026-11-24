@@ -56,6 +56,14 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
   useEffect(() => { void refreshSessions().catch(err=>setError(err.message)); }, [refreshSessions]);
   useEffect(() => { void refreshDetail().catch(err=>setError(err.message)); }, [refreshDetail]);
   useEffect(() => {
+    if (!selectedId) return;
+    const poll = window.setInterval(() => {
+      void refreshDetail().catch(() => undefined);
+      void refreshSessions().catch(() => undefined);
+    }, 15000);
+    return () => window.clearInterval(poll);
+  }, [selectedId, refreshDetail, refreshSessions]);
+  useEffect(() => {
     return () => { void monitor?.disconnect(); };
   }, [monitor]);
 
@@ -113,8 +121,10 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
   async function sessionAction(action:"start"|"end") {
     if (!selectedId) return;
     try {
-      await apiRequest<{session:Session;broadcastOutput?:string}>("/v1/sessions/"+selectedId+"/"+action,{method:"POST"});
-      setMessage(action==="start" ? "Session marked live. The final programme remains offline until the production engine is deployed." : "Session ended. Recording retention is scheduled for seven days after the end time.");
+      const result = await apiRequest<{session:Session;broadcastOutput?:string;recordingEnabled?:boolean;recordingAvailable?:boolean;message?:string}>("/v1/sessions/"+selectedId+"/"+action,{method:"POST"});
+      setMessage(action==="start"
+        ? (result.message || (result.recordingEnabled ? "Broadcast startup was requested. Recording is configured." : "Broadcast startup was requested, but R2 recording credentials are not configured."))
+        : (result.recordingAvailable ? "Session ended and the programme recording is available for seven days." : "Session ended. No completed R2 recording was confirmed; check media-engine and storage configuration."));
       await refreshSessions(); await refreshDetail();
     } catch(err) { setError(err instanceof Error ? err.message : "Session update failed."); }
   }
@@ -164,7 +174,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
           <section className="session-card">
             <div className="section-heading"><div><span className="eyebrow">SELECTED SESSION</span><h3>{activeSession?.title ?? "Choose a session"}</h3></div><span className={isLive?"live-tag":"draft-tag"}>{activeSession?.status?.toUpperCase() ?? "NO SESSION"}</span></div>
             {activeSession ? <>
-              <div className="session-meta"><span><Users size={15}/>{contributors.length} contributors</span><span><Eye size={15}/>{detail?.viewerCount ?? 0} viewers</span><span><Activity size={15}/>{detail?.mediaEngine==="connected"?"Engine connected":"Engine offline"}</span></div>
+              <div className="session-meta"><span><Users size={15}/>{contributors.length} contributors</span><span><Eye size={15}/>{detail?.viewerCount ?? 0} viewers</span><span><Activity size={15}/>{detail?.mediaEngine==="running"?"Engine running":detail?.mediaEngine==="failed"?"Engine failed":"Engine not started"}</span></div>
               <div className="action-row">
                 <button className="secondary-button" onClick={()=>void generateLinks()}>Generate share links</button>
                 {activeSession.status!=="ended" && <button className="primary-button" onClick={()=>void sessionAction(isLive?"end":"start")}>{isLive?"End session":"Mark session live"}</button>}
@@ -184,7 +194,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
             <div className="feed-grid">{visibleParticipants.map(participant=><FeedTile key={participant.identity} participant={participant} selected={selectedSource===participant.identity} onSelect={identity=>{setSelectedSource(identity);void command("select-source",{participantIdentity:identity});}}/>)}</div>
             {participants.length > feedPageSize && <div className="feed-pagination"><span>Showing {feedPage*feedPageSize+1}–{Math.min((feedPage+1)*feedPageSize,participants.length)} of {participants.length} feeds</span><div><button className="secondary-button" disabled={feedPage===0} onClick={()=>setFeedPage(page=>Math.max(0,page-1))}>Previous</button><button className="secondary-button" disabled={feedPage>=feedPageCount-1} onClick={()=>setFeedPage(page=>Math.min(feedPageCount-1,page+1))}>Next</button></div></div>}
           </> : <div className="empty-grid"><div className="empty-icon"><Video size={26}/></div><h3>No camera previews currently connected</h3><p>Invite contributors and connect the camera monitor. LiveKit must be configured for real feeds to arrive.</p></div>}
-          <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PROGRAMME OUTPUT</span><h3>Production controls</h3></div><span className="draft-tag">ENGINE OFFLINE</span></div>
+          <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PROGRAMME OUTPUT</span><h3>Production controls</h3></div><span className={detail?.mediaEngine==="running"?"live-tag":"draft-tag"}>{(detail?.mediaEngine ?? "not-started").toUpperCase()}</span></div>
             <div className="production-grid">
               <div><b>Selected source</b><p>{selectedSource || "No camera selected"}</p><small>Selection is saved as a production command; no final switch is applied until the engine is running.</small></div>
               <div><b>Contributor audio</b><p>Mute commands can be queued for the media engine.</p><div className="mix-actions"><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:true})}><VolumeX size={15}/> Mute all</button><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:false})}><Mic size={15}/> Unmute all</button></div></div>
