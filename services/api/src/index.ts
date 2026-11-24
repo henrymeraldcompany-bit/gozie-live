@@ -353,12 +353,62 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (!displayName || displayName.length > 80) return fail("Enter a display name (maximum 80 characters).");
     const session = await findSessionByCode(env, body.code ?? "", "contributor");
     const identity = "cam-" + crypto.randomUUID();
-    const token = await liveKitToken(env, { identity, name: displayName, room: sessionRoom(session.id, "contributors"), canPublish: true, canSubscribe: false });
-    const rows = await db<ContributorRow[]>(env, "contributors", {
-      method: "POST", headers: { prefer: "return=representation" },
-      body: JSON.stringify({ session_id: session.id, display_name: displayName, provider_identity: identity, status: "connected" })
+    const leaveSecret = randomCode();
+    const leaveSecretHash = await sha256(leaveSecret);
+    let rows: ContributorRow[];
+    try {
+      rows = await db<ContributorRow[]>(env, "rpc/admit_contributor", {
+        method: "POST",
+        body: JSON.stringify({
+          p_session_id: session.id,
+          p_display_name: displayName,
+          p_provider_identity: identity,
+          p_leave_secret_hash: leaveSecretHash,
+          p_max: 200
+        })
+      });
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("CAMERA_CAPACITY_REACHED")) {
+        return fail("This session has reached its 200-camera contributor limit.", 429);
+      }
+      if (error instanceof Error && error.message.includes("SESSION_NOT_JOINABLE")) {
+        return fail("This session is no longer accepting camera contributors.", 409);
+      }
+      throw error;
+    }
+    if (!rows.length) return fail("A contributor slot could not be reserved.", 503);
+    let token: string;
+    try {
+      token = await liveKitToken(env, { identity, name: displayName, room: sessionRoom(session.id, "contributors"), canPublish: true, canSubscribe: false });
+    } catch (error) {
+      await db(env, "rpc/refresh_contributor_presence", {
+        method: "POST",
+        body: JSON.stringify({ p_contributor_id: rows[0].id, p_leave_secret_hash: leaveSecretHash, p_leave: true })
+      }).catch(() => undefined);
+      throw error;
+    }
+    return json({
+      session: { id: session.id, title: session.title },
+      contributor: rows[0],
+      leaveSecret,
+      livekitUrl: env.LIVEKIT_URL,
+      token
+    }, 201);
+  }
+  if (path === "/v1/contributors/presence" && request.method === "POST") {
+    const body = await jsonBody<{ contributorId?: string; leaveSecret?: string; leave?: boolean }>(request);
+    if (!body.contributorId || !body.leaveSecret || body.leaveSecret.length > 128) return fail("Contributor presence credentials are missing.");
+    const secretHash = await sha256(body.leaveSecret);
+    const changed = await db<boolean>(env, "rpc/refresh_contributor_presence", {
+      method: "POST",
+      body: JSON.stringify({
+        p_contributor_id: body.contributorId,
+        p_leave_secret_hash: secretHash,
+        p_leave: Boolean(body.leave)
+      })
     });
-    return json({ session: { id: session.id, title: session.title }, contributor: rows[0], livekitUrl: env.LIVEKIT_URL, token }, 201);
+    if (!changed) return fail("Contributor presence credentials are invalid.", 403);
+    return json({ ok: true, status: body.leave ? "disconnected" : "connected" });
   }
   if (joinViewer && request.method === "POST") {
     const body = await jsonBody<{ code?: string }>(request);
