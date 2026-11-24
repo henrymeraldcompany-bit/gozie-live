@@ -485,6 +485,95 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json({ session: sessions[0], recordings });
   }
 
+  if (path === "/v1/public/engine/state" && request.method === "GET") {
+    const sessionId = url.searchParams.get("sessionId") ?? "";
+    const controlCode = url.searchParams.get("controlCode") ?? "";
+    if (!/^[0-9a-f-]{36}$/i.test(sessionId) || !controlCode || controlCode.length > 128) return fail("Invalid production engine access.", 400);
+    const codeHash = await sha256(controlCode);
+    const runs = await db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + encodeURIComponent(sessionId) + "&control_code_hash=eq." + codeHash + "&select=*&limit=1");
+    if (!runs.length || runs[0].status !== "running") return fail("Production engine session is not active.", 404);
+    const claimed = await db<Array<{ id: string; command_type: string; payload: Record<string, unknown> }>>(env, "rpc/claim_production_commands", {
+      method: "POST", body: JSON.stringify({ p_session_id: sessionId, p_limit: 25 })
+    });
+    for (const command of claimed) {
+      let commandError = "";
+      const payload = command.payload ?? {};
+      try {
+        if (command.command_type === "select-source") {
+          const identity = typeof payload.participantIdentity === "string" ? payload.participantIdentity : "";
+          const allowed = await db<Array<{ id: string }>>(env, "contributors?session_id=eq." + sessionId + "&provider_identity=eq." + encodeURIComponent(identity) + "&status=neq.removed&select=id&limit=1");
+          if (!identity || !allowed.length) throw new Error("Camera source is not an admitted contributor for this session.");
+          await db(env, "production_engine_runs?session_id=eq." + sessionId, {
+            method: "PATCH", headers: { prefer: "return=minimal" },
+            body: JSON.stringify({ selected_source_identity: identity, selected_asset_id: null, updated_at: nowIso() })
+          });
+        } else if (command.command_type === "mute-contributor") {
+          if (typeof payload.contributorId !== "string" || typeof payload.muted !== "boolean") throw new Error("Mute command payload is invalid.");
+          await db(env, "contributors?id=eq." + encodeURIComponent(payload.contributorId) + "&session_id=eq." + sessionId, {
+            method: "PATCH", headers: { prefer: "return=minimal" },
+            body: JSON.stringify({ audio_muted: payload.muted })
+          });
+        } else if (command.command_type === "set-audio-mix") {
+          if (typeof payload.muteAll !== "boolean") throw new Error("Audio mix command payload is invalid.");
+          await db(env, "contributors?session_id=eq." + sessionId + "&status=neq.removed", {
+            method: "PATCH", headers: { prefer: "return=minimal" },
+            body: JSON.stringify({ audio_muted: payload.muteAll })
+          });
+        } else if (command.command_type === "set-media-source") {
+          if (typeof payload.assetId !== "string") throw new Error("Media source command payload is invalid.");
+          const assets = await db<Array<{ id: string }>>(env, "media_assets?id=eq." + encodeURIComponent(payload.assetId) + "&session_id=eq." + sessionId + "&select=id&limit=1");
+          if (!assets.length) throw new Error("Media asset does not belong to this session.");
+          await db(env, "production_engine_runs?session_id=eq." + sessionId, {
+            method: "PATCH", headers: { prefer: "return=minimal" },
+            body: JSON.stringify({ selected_asset_id: payload.assetId, updated_at: nowIso() })
+          });
+        } else {
+          throw new Error("This control is not supported by the current production engine.");
+        }
+        await db(env, "production_commands?id=eq." + command.id, {
+          method: "PATCH", headers: { prefer: "return=minimal" },
+          body: JSON.stringify({ status: "applied", processed_at: nowIso(), error_message: null })
+        });
+      } catch (error) {
+        commandError = error instanceof Error ? error.message : "Production command failed.";
+        await db(env, "production_commands?id=eq." + command.id, {
+          method: "PATCH", headers: { prefer: "return=minimal" },
+          body: JSON.stringify({ status: "failed", processed_at: nowIso(), error_message: commandError.slice(0, 400) })
+        });
+      }
+    }
+    const [freshRuns, contributors, sessions] = await Promise.all([
+      db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + sessionId + "&control_code_hash=eq." + codeHash + "&select=*&limit=1"),
+      db<Array<{ id: string; display_name: string; provider_identity: string | null; audio_muted: boolean }>>(env, "contributors?session_id=eq." + sessionId + "&status=neq.removed&select=id,display_name,provider_identity,audio_muted"),
+      db<Array<{ title: string }>>(env, "broadcast_sessions?id=eq." + sessionId + "&select=title&limit=1")
+    ]);
+    const run = freshRuns[0];
+    let asset: { id: string; asset_kind: string; content_type: string; file_name: string | null } | null = null;
+    if (run.selected_asset_id) {
+      const assets = await db<Array<{ id: string; asset_kind: string; content_type: string; file_name: string | null }>>(env, "media_assets?id=eq." + run.selected_asset_id + "&session_id=eq." + sessionId + "&select=id,asset_kind,content_type,file_name&limit=1");
+      asset = assets[0] ?? null;
+    }
+    return json({
+      sessionId, title: sessions[0]?.title ?? "GOZIE LIVE",
+      selectedSourceIdentity: run.selected_source_identity, asset, contributors
+    });
+  }
+  const engineAsset = path.match(/^\\/v1\\/public\\/engine\\/assets\\/([0-9a-f-]+)$/i);
+  if (engineAsset && request.method === "GET") {
+    const sessionId = url.searchParams.get("sessionId") ?? "";
+    const controlCode = url.searchParams.get("controlCode") ?? "";
+    const hash = await sha256(controlCode);
+    const runs = await db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + encodeURIComponent(sessionId) + "&control_code_hash=eq." + hash + "&status=eq.running&select=id&limit=1");
+    if (!runs.length) return fail("Production media access denied.", 403);
+    const assets = await db<AssetRow[]>(env, "media_assets?id=eq." + encodeURIComponent(engineAsset[1]) + "&session_id=eq." + encodeURIComponent(sessionId) + "&select=*&limit=1");
+    if (!assets.length) return fail("Media asset not found.", 404);
+    const object = await env.MEDIA_BUCKET.get(assets[0].object_key);
+    if (!object?.body) return fail("Media asset file is unavailable.", 404);
+    return new Response(object.body, { headers: {
+      "content-type": assets[0].content_type, "cache-control": "private, no-store",
+      "content-disposition": "inline"
+    } });
+  }
   const publicRecording = path.match(/^\/v1\/public\/recordings\/([0-9a-f-]+)$/i);
   if (publicRecording && request.method === "GET") {
     const code = url.searchParams.get("code") ?? "";
