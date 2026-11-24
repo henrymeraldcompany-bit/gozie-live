@@ -1,3 +1,4 @@
+import { STATIC_ASSETS_GZIP_B64 } from "./generated-assets.js";
 interface D1Stmt {
  bind(...values: unknown[]): D1Stmt;
  first<T = unknown>(): Promise<T | null>;
@@ -11,12 +12,19 @@ interface Env {
  REALTIME_SFU_APP_ID:string; REALTIME_SFU_APP_SECRET:string; AUTH_SIGNING_SECRET:string;
  APP_ORIGIN:string; APP_BASE_PATH:string; EMAIL_FROM?:string;
  EMAIL?:{send(m:{to:string;from:string;subject:string;text:string;html:string}):Promise<unknown>};
- ASSETS?:{fetch(req:Request):Promise<Response>};
 }
 type User={id:string;email:string;display_name:string;email_verified:number};
 type Session={id:string;owner_id:string;title:string;status:string;scheduled_at:string|null;live_started_at:string|null;ended_at:string|null;contributor_code_hash:string;viewer_code_hash:string;public_id:string;programme_uid?:string|null};
 const enc=new TextEncoder();
 const now=()=>new Date().toISOString();
+let appAssetsPromise: Promise<Record<string,string>> | null = null;
+async function serveAppAsset(pathname:string):Promise<Response>{
+ if(!appAssetsPromise){appAssetsPromise=(async()=>{const raw=atob(STATIC_ASSETS_GZIP_B64);const bytes=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);const stream=new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));return JSON.parse(await new Response(stream).text()) as Record<string,string>;})();}
+ const assets=await appAssetsPromise;const requested=pathname==="/"||pathname===""?"/index.html":pathname;let key=requested;
+ if(!(key in assets)){if(key.startsWith("/assets/"))return new Response("Not found.",{status:404});key="/index.html";}
+ const type=key.endsWith(".html")?"text/html; charset=utf-8":key.endsWith(".js")?"text/javascript; charset=utf-8":key.endsWith(".css")?"text/css; charset=utf-8":key.endsWith(".svg")?"image/svg+xml":key.endsWith(".png")?"image/png":key.endsWith(".webp")?"image/webp":"application/octet-stream";
+ return new Response(assets[key],{headers:{"content-type":type,"cache-control":key==="/index.html"?"no-cache":"public, max-age=31536000, immutable","x-content-type-options":"nosniff"}});
+}
 const uuid=()=>crypto.randomUUID();
 const hex=(b:Uint8Array)=>[...b].map(x=>x.toString(16).padStart(2,"0")).join("");
 const random=(n=32)=>hex(crypto.getRandomValues(new Uint8Array(n)));
@@ -180,14 +188,13 @@ export default {
    if(p==="/gozie-live")return Response.redirect(new URL("/gozie-live/",original),308);
    const res=await handle(req,env);
    if(res.status!==404||p.startsWith("/v1/")||p==="/health")return res;
-   if(!env.ASSETS)return res;
    const assetUrl=new URL(req.url);
    if(assetUrl.pathname==="/gozie-live/"||assetUrl.pathname.startsWith("/gozie-live/")){
     assetUrl.pathname=assetUrl.pathname.slice("/gozie-live".length)||"/";
    }else if(assetUrl.pathname!=="/"){
     return res;
    }
-   return env.ASSETS.fetch(new Request(assetUrl,req));
+   return serveAppAsset(assetUrl.pathname);
   }catch(e){if(e instanceof Response)return e;return json({error:e instanceof Error?e.message:"Unexpected server error."},500);}
  },
  async scheduled(_controller:unknown,env:Env){
