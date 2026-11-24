@@ -1,148 +1,30 @@
-import { useEffect, useRef, useState } from "react";
-import { Camera, Mic, MicOff, Radio, ShieldCheck, Video, VideoOff } from "lucide-react";
-import { createLocalTracks, Room } from "livekit-client";
-import type { LocalTrack } from "livekit-client";
-import { apiRequest } from "../lib/api";
-
-type JoinResult = {
-  session: { id: string; title: string };
-  contributor: { id: string };
-  leaveSecret: string;
-  livekitUrl: string;
-  token: string;
-};
-type ContributorPresence = { contributorId: string; leaveSecret: string };
-
-export default function CameraStudio({ code }: { code: string }) {
-  const [displayName, setDisplayName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [sessionTitle, setSessionTitle] = useState("");
-  const [connected, setConnected] = useState(false);
-  const [cameraOn, setCameraOn] = useState(true);
-  const [micOn, setMicOn] = useState(true);
-  const [room, setRoom] = useState<Room | null>(null);
-  const [tracks, setTracks] = useState<LocalTrack[]>([]);
-  const preview = useRef<HTMLVideoElement>(null);
-  const roomRef = useRef<Room | null>(null);
-  const tracksRef = useRef<LocalTrack[]>([]);
-  const presenceRef = useRef<ContributorPresence | null>(null);
-  const heartbeatRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    if (!connected || !preview.current) return;
-    const videoTrack = tracks.find(track => track.kind === "video");
-    if (!videoTrack) return;
-    videoTrack.attach(preview.current);
-    return () => { videoTrack.detach(preview.current!); };
-  }, [connected, tracks]);
-
-  useEffect(() => {
-    return () => {
-      if (heartbeatRef.current !== null) window.clearInterval(heartbeatRef.current);
-      const presence = presenceRef.current;
-      if (presence) {
-        void apiRequest("/v1/contributors/presence", {
-          method: "POST",
-          body: JSON.stringify({ ...presence, leave: true })
-        }).catch(() => undefined);
-      }
-      tracksRef.current.forEach(track => { track.detach(); track.stop(); });
-      void roomRef.current?.disconnect();
-    };
-  }, []);
-
-  async function join(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setError("");
-    let localTracks: LocalTrack[] = [];
-    let nextRoom: Room | null = null;
-    try {
-      if (!code) throw new Error("This camera link is missing its session code. Ask the host for a new contributor link.");
-      // Ask for camera/microphone permission before reserving a contributor slot.
-      localTracks = await createLocalTracks({ audio: true, video: { facingMode: "user", resolution: { width: 1280, height: 720 } } });
-      const result = await apiRequest<JoinResult>("/v1/join/contributor", { method: "POST", body: JSON.stringify({ code, displayName: displayName.trim() }) });
-      presenceRef.current = { contributorId: result.contributor.id, leaveSecret: result.leaveSecret };
-      nextRoom = new Room({ adaptiveStream: true, dynacast: true });
-      roomRef.current = nextRoom;
-      tracksRef.current = localTracks;
-      await nextRoom.connect(result.livekitUrl, result.token);
-      for (const track of localTracks) await nextRoom.localParticipant.publishTrack(track);
-      setTracks(localTracks); setRoom(nextRoom); setSessionTitle(result.session.title); setConnected(true);
-      heartbeatRef.current = window.setInterval(() => {
-        const presence = presenceRef.current;
-        if (!presence) return;
-        void apiRequest("/v1/contributors/presence", {
-          method: "POST",
-          body: JSON.stringify(presence)
-        }).catch(() => {
-          setError("Your camera connection may have expired. Check your network before continuing.");
-        });
-      }, 20000);
-    } catch (err) {
-      localTracks.forEach(track => { track.detach(); track.stop(); });
-      await nextRoom?.disconnect();
-      tracksRef.current = [];
-      roomRef.current = null;
-      if (heartbeatRef.current !== null) window.clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
-      const presence = presenceRef.current;
-      if (presence) {
-        await apiRequest("/v1/contributors/presence", {
-          method: "POST", body: JSON.stringify({ ...presence, leave: true })
-        }).catch(() => undefined);
-        presenceRef.current = null;
-      }
-      setError(err instanceof Error ? err.message : "Unable to join the camera room.");
-    } finally { setBusy(false); }
-  }
-  async function toggleCamera() {
-    if (!room) return;
-    try { const next = !cameraOn; await room.localParticipant.setCameraEnabled(next); setCameraOn(next); }
-    catch (err) { setError(err instanceof Error ? err.message : "Could not change camera state."); }
-  }
-  async function toggleMic() {
-    if (!room) return;
-    try { const next = !micOn; await room.localParticipant.setMicrophoneEnabled(next); setMicOn(next); }
-    catch (err) { setError(err instanceof Error ? err.message : "Could not change microphone state."); }
-  }
-  async function leave() {
-    if (heartbeatRef.current !== null) window.clearInterval(heartbeatRef.current);
-    heartbeatRef.current = null;
-    const presence = presenceRef.current;
-    presenceRef.current = null;
-    if (presence) {
-      await apiRequest("/v1/contributors/presence", {
-        method: "POST", body: JSON.stringify({ ...presence, leave: true })
-      }).catch(() => undefined);
-    }
-    tracksRef.current.forEach(track => { track.detach(); track.stop(); });
-    tracksRef.current = [];
-    await roomRef.current?.disconnect();
-    roomRef.current = null;
-    setTracks([]); setRoom(null); setConnected(false); setCameraOn(true); setMicOn(true);
-  }
-
-  return <main className="public-shell">
-    <header className="public-brand"><span className="brand-mark"><Radio size={20}/></span><span>GOZIE <b>LIVE</b></span><span className="public-role">CAMERA STUDIO</span></header>
-    <section className="public-card">
-      <span className="eyebrow">CONTRIBUTOR CONNECTION</span>
-      <h1>{connected ? sessionTitle : "Join the live camera room"}</h1>
-      <p>{connected ? "Your phone is publishing to the host's camera monitor. Keep this page open while contributing." : "Enter the name the host should see. Your browser will ask permission to use your camera and microphone."}</p>
-      {!connected ? <form onSubmit={join} className="stack-form">
-        <label>Display name<input required maxLength={80} value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="Enter your name"/></label>
-        {error && <div className="inline-error">{error}</div>}
-        <button className="primary-button full-width" disabled={busy || !code}><Camera size={17}/>{busy ? "Connecting…" : "Allow camera and join"}</button>
-        <div className="privacy-note"><ShieldCheck size={17}/> Your camera feed is sent to the host's private contributor room, not directly to viewers.</div>
-      </form> : <>
-        <div className="self-preview"><video ref={preview} autoPlay playsInline muted/><div className="preview-label"><span className="online-dot"/> CAMERA CONNECTED</div></div>
-        {error && <div className="inline-error">{error}</div>}
-        <div className="camera-controls">
-          <button className={micOn ? "round-control" : "round-control off"} onClick={toggleMic}>{micOn ? <Mic/> : <MicOff/>}{micOn ? "Mic on" : "Mic off"}</button>
-          <button className={cameraOn ? "round-control" : "round-control off"} onClick={toggleCamera}>{cameraOn ? <Video/> : <VideoOff/>}{cameraOn ? "Camera on" : "Camera off"}</button>
-          <button className="danger-button" onClick={leave}>Leave room</button>
-        </div>
-      </>}
-    </section>
-    <footer className="public-footer">GOZIE LIVE · Camera capture may pause if your phone locks or the browser is sent to the background. Abandoned contributor slots expire after 60 seconds without a heartbeat.</footer>
-  </main>;
+import {useEffect,useRef,useState} from "react";
+import {Camera,Mic,MicOff,Radio,ShieldCheck,Video,VideoOff} from "lucide-react";
+import {apiRequest} from "../lib/api";
+import {createPeerConnection,waitForIce} from "../lib/realtime";
+type Join={session:{id:string;title:string};contributor:{id:string};leaveSecret:string};
+export default function CameraStudio({code}:{code:string}){
+ const [displayName,setDisplayName]=useState(""),[sessionTitle,setSessionTitle]=useState(""),[busy,setBusy]=useState(false),[connected,setConnected]=useState(false),[cameraOn,setCameraOn]=useState(true),[micOn,setMicOn]=useState(true),[error,setError]=useState(""),[message,setMessage]=useState("");
+ const preview=useRef<HTMLVideoElement>(null),streamRef=useRef<MediaStream|null>(null),pcRef=useRef<RTCPeerConnection|null>(null),presence=useRef<{contributorId:string;leaveSecret:string}|null>(null),timer=useRef<number|null>(null);
+ useEffect(()=>()=>{if(timer.current!==null)clearInterval(timer.current);const p=presence.current;if(p)void apiRequest("/v1/contributors/presence",{method:"POST",body:JSON.stringify({...p,leave:true})}).catch(()=>{});pcRef.current?.close();streamRef.current?.getTracks().forEach(t=>t.stop());},[]);
+ async function join(e:React.FormEvent){e.preventDefault();setBusy(true);setError("");setMessage("");let media:MediaStream|null=null,pc:RTCPeerConnection|null=null;try{
+  if(!code)throw new Error("This contributor link is incomplete. Ask the host for a fresh link.");
+  media=await navigator.mediaDevices.getUserMedia({audio:true,video:{facingMode:"user",width:{ideal:1280},height:{ideal:720}}});
+  const reservation=await apiRequest<Join>("/v1/join/contributor",{method:"POST",body:JSON.stringify({code,displayName:displayName.trim()})});presence.current={contributorId:reservation.contributor.id,leaveSecret:reservation.leaveSecret};
+  pc=createPeerConnection();pcRef.current=pc;streamRef.current=media;if(preview.current)preview.current.srcObject=media;
+  const trackMeta:Array<{mid:string;trackName:string;kind:string}>=[];
+  for(const track of media.getTracks())pc.addTransceiver(track,{direction:"sendonly"});
+  const offer=await pc.createOffer();await pc.setLocalDescription(offer);await waitForIce(pc);
+  for(const transceiver of pc.getTransceivers()){if(transceiver.sender.track&&transceiver.mid)trackMeta.push({mid:transceiver.mid,trackName:transceiver.sender.track.kind==="video"?"camera":"microphone",kind:transceiver.sender.track.kind});}
+  const published=await apiRequest<{sessionDescription:{type:RTCSdpType;sdp:string}}>("/v1/media/publish",{method:"POST",body:JSON.stringify({code,contributorId:reservation.contributor.id,leaveSecret:reservation.leaveSecret,sessionDescription:pc.localDescription,tracks:trackMeta})});
+  await pc.setRemoteDescription(published.sessionDescription);setSessionTitle(reservation.session.title);setConnected(true);
+  timer.current=window.setInterval(()=>{const p=presence.current;if(p)void apiRequest("/v1/contributors/presence",{method:"POST",body:JSON.stringify(p)}).catch(()=>{});},15000);
+  setMessage("Your camera feed is connected to Cloudflare Realtime. Keep this page open while contributing.");
+ }catch(err){pc?.close();media?.getTracks().forEach(t=>t.stop());setError(err instanceof Error?err.message:"Could not connect your camera.");}finally{setBusy(false);}}
+ function toggleCamera(){const track=streamRef.current?.getVideoTracks()[0];if(track){track.enabled=!track.enabled;setCameraOn(track.enabled);}}
+ function toggleMic(){const track=streamRef.current?.getAudioTracks()[0];if(track){track.enabled=!track.enabled;setMicOn(track.enabled);}}
+ async function leave(){if(timer.current!==null)clearInterval(timer.current);const p=presence.current;if(p)await apiRequest("/v1/contributors/presence",{method:"POST",body:JSON.stringify({...p,leave:true})}).catch(()=>{});pcRef.current?.close();streamRef.current?.getTracks().forEach(t=>t.stop());pcRef.current=null;streamRef.current=null;presence.current=null;setConnected(false);setMessage("You have left the camera session.");}
+ return <main className="camera-page"><header className="camera-header"><div className="brand-mark"><Radio/></div><div><b>GOZIE LIVE</b><small>Camera contributor</small></div><span className={connected?"live-indicator":"status-pill"}>{connected?"CONNECTED":"READY"}</span></header>
+  <section className="camera-content">{!connected?<form className="camera-join-card" onSubmit={join}><span className="eyebrow">CONTRIBUTOR ACCESS</span><h1>Join the camera team</h1><p>Enter your display name and allow camera and microphone access when your browser asks.</p><label>Your display name<input required maxLength={80} value={displayName} onChange={e=>setDisplayName(e.target.value)} placeholder="e.g. Front camera"/></label>{error&&<div className="inline-error">{error}</div>}<button className="primary-button full-width" disabled={busy||!code}>{busy?"Connecting camera…":"Enable camera and join"}</button><small className="muted">Only your camera and microphone tracks are published. You cannot access host controls.</small></form>:<><div className="camera-session-title"><span className="feed-live-dot"/> <div><b>{sessionTitle}</b><small>Sending live camera and microphone</small></div></div><div className="camera-local-preview">{<video ref={preview} autoPlay muted playsInline/>}</div><div className="camera-control-row"><button className="secondary-button" onClick={toggleCamera}>{cameraOn?<Video/>:<VideoOff/>}{cameraOn?"Camera on":"Camera off"}</button><button className="secondary-button" onClick={toggleMic}>{micOn?<Mic/>:<MicOff/>}{micOn?"Microphone on":"Microphone muted"}</button><button className="danger-button" onClick={()=>void leave()}>Leave session</button></div><div className="inline-success"><ShieldCheck size={16}/> {message}</div></>}</section>
+ </main>;
 }
