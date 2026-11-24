@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from "react";
-import {Camera,Mic,MicOff,Radio,ShieldCheck,Video,VideoOff} from "lucide-react";
+import {Mic,MicOff,Radio,ShieldCheck,Video,VideoOff} from "lucide-react";
 import {apiRequest} from "../lib/api";
 import {createPeerConnection,waitForIce} from "../lib/realtime";
 type Join={session:{id:string;title:string};contributor:{id:string};leaveSecret:string};
