@@ -12,7 +12,6 @@ REALTIME_SFU_APP_ID = "a15d31f644b96a0376362c254686ea40"
 binding = "DB"
 database_name = "gozie-live-db"
 database_id = "67f8680e-5c19-4cc6-b082-65d12dc7846a"
-migrations_dir = "../../database/cloudflare-d1"
 
 [[r2_buckets]]
 binding = "MEDIA_BUCKET"
