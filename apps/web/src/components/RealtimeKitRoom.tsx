@@ -18,6 +18,7 @@ export default function RealtimeKitRoom({authToken,role,onLeave}:{authToken:stri
   });
   return()=>{active=false;};
  },[authToken,role,initMeeting]);
+ useEffect(()=>()=>{if(meeting)void meeting.leave().catch(()=>{});},[meeting]);
  async function leave(){
   if(leaving)return;
   setLeaving(true);
