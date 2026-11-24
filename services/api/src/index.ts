@@ -142,7 +142,7 @@ async function liveKitRpc<T>(env: Env, service: string, method: string, grant: R
 interface EngineRunRow {
   id: string; session_id: string; control_code_hash: string; ingress_id: string | null; egress_id: string | null;
   recording_object_key: string | null; selected_source_identity: string | null; selected_asset_id: string | null;
-  status: string; started_at: string; ended_at: string | null;
+  status: string; started_at: string; ended_at: string | null; last_error?: string | null;
 }
 async function ensureLiveKitRoom(env: Env, roomName: string): Promise<void> {
   const listed = await liveKitRpc<{ rooms?: Array<{ name: string }> }>(env, "RoomService", "ListRooms", { roomList: true }, { names: [roomName] });
@@ -230,19 +230,20 @@ async function startBroadcastEngine(env: Env, session: SessionRow): Promise<Reco
         file_outputs: fileOutputs
       }
     );
+    const engineStatus = egress.status === "EGRESS_ACTIVE" ? "running" : "starting";
     await db(env, "production_engine_runs?id=eq." + run.id, {
       method: "PATCH", headers: { prefer: "return=minimal" },
-      body: JSON.stringify({ ingress_id: ingressId, egress_id: egress.egress_id, recording_object_key: recordingObjectKey, status: "running", last_error: null })
+      body: JSON.stringify({ ingress_id: ingressId, egress_id: egress.egress_id, recording_object_key: recordingObjectKey, status: engineStatus, last_error: null })
     });
     const updated = await db<SessionRow[]>(env, "broadcast_sessions?id=eq." + session.id, {
       method: "PATCH", headers: { prefer: "return=representation" },
       body: JSON.stringify({ status: "live", live_started_at: nowIso() })
     });
     return {
-      session: updated[0], mediaEngine: "running", broadcastOutput: "startup-requested",
+      session: updated[0], mediaEngine: engineStatus, broadcastOutput: "startup-requested",
       egressStatus: egress.status, recordingEnabled,
       recordingNotice: recordingEnabled ? "Programme recording is configured to save to private R2 storage." : "Live output is configured, but R2 S3 credentials are missing so recording is not enabled.",
-      message: "LiveKit composition and programme-room publishing have been requested. Confirm that the programme appears in the viewer before treating the broadcast as live."
+      message: "LiveKit accepted the programme start request. The engine is reported as " + engineStatus + "; confirm the final programme preview before treating it as live."
     };
   } catch (error) {
     if (ingressId) {
@@ -444,7 +445,36 @@ async function handle(request: Request, env: Env): Promise<Response> {
         db<Array<{ id: string }>>(env, "viewer_presence?session_id=eq." + id + "&expires_at=gt." + encodeURIComponent(nowIso()) + "&select=id"),
         db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + id + "&select=status,egress_id,recording_object_key,started_at,ended_at,last_error&limit=1")
       ]);
-      return json({ session, contributors, assets, recordings, viewerCount: viewers.length, mediaEngine: engineRuns[0]?.status ?? "not-started", engine: engineRuns[0] ?? null });
+      const engine = engineRuns[0] ?? null;
+      if (engine?.egress_id && (engine.status === "starting" || engine.status === "running") && env.LIVEKIT_API_KEY && env.LIVEKIT_API_SECRET) {
+        try {
+          const active = await liveKitRpc<{ items?: Array<{ egress_id: string; status: string; error?: string }> }>(
+            env, "Egress", "ListEgress", { roomRecord: true }, { egress_id: engine.egress_id }
+          );
+          const egressState = active.items?.find(item => item.egress_id === engine.egress_id);
+          if (egressState) {
+            const mappedStatus =
+              egressState.status === "EGRESS_ACTIVE" ? "running" :
+              egressState.status === "EGRESS_STARTING" ? "starting" :
+              egressState.status === "EGRESS_FAILED" || egressState.status === "EGRESS_ABORTED" || egressState.status === "EGRESS_LIMIT_REACHED" ? "failed" :
+              egressState.status === "EGRESS_ENDING" ? "stopping" : engine.status;
+            if (mappedStatus !== engine.status || egressState.error) {
+              await db(env, "production_engine_runs?session_id=eq." + id, {
+                method: "PATCH", headers: { prefer: "return=minimal" },
+                body: JSON.stringify({ status: mappedStatus, last_error: egressState.error || null, updated_at: nowIso() })
+              });
+              engine.status = mappedStatus;
+              engine.last_error = egressState.error || null;
+            }
+          }
+        } catch {
+          // The dashboard remains readable if LiveKit's status endpoint is briefly unavailable.
+        }
+      }
+      return json({
+        session, contributors, assets, recordings, viewerCount: viewers.length,
+        mediaEngine: engine?.status ?? "not-started", engine
+      });
     }
     if (action === "share-links" && request.method === "POST") {
       const contributorCode = randomCode();
