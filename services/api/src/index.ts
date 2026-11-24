@@ -312,6 +312,16 @@ async function handle(request: Request, env: Env): Promise<Response> {
     return json({ recording: inserted, expiresAt }, 201);
   }
 
+  if (path === "/v1/public/session" && request.method === "GET") {
+    const code = url.searchParams.get("code") ?? "";
+    if (!code || code.length > 128) return fail("Invalid viewer link.", 400);
+    const hash = await sha256(code);
+    const sessions = await db<Array<{ id: string; title: string; status: string; scheduled_at: string | null; ended_at: string | null }>>(env, "broadcast_sessions?viewer_code_hash=eq." + hash + "&select=id,title,status,scheduled_at,ended_at&limit=1");
+    if (!sessions.length) return fail("Invalid viewer link.", 403);
+    const recordings = await db<Array<{ id: string; expires_at: string; size_bytes: number | null }>>(env, "recordings?session_id=eq." + sessions[0].id + "&deleted_at=is.null&expires_at=gt." + encodeURIComponent(nowIso()) + "&select=id,expires_at,size_bytes&order=created_at.desc");
+    return json({ session: sessions[0], recordings });
+  }
+
   const publicRecording = path.match(/^\/v1\/public\/recordings\/([0-9a-f-]+)$/i);
   if (publicRecording && request.method === "GET") {
     const code = url.searchParams.get("code") ?? "";
