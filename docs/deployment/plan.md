@@ -11,7 +11,7 @@ The GitHub repository home page displays the README and source code. It is not t
 - Dedicated account: **Live Stream**.
 - Workers subdomain: `gozielive.workers.dev`.
 - Worker: `gozie-live`.
-- Latest deployed Worker deployment ID: update after final deployment.
+- Latest deployed Worker deployment ID: `83e65df817014bfbbd0d858f62963cee`.
 - Worker subdomain access: enabled.
 - D1 database: `gozie-live-db`, APAC, ID `67f8680e-5c19-4cc6-b082-65d12dc7846a`.
 - R2 bucket: `gozie-live-media`, private.
@@ -44,7 +44,7 @@ No Supabase or LiveKit integration is part of the application stack.
 
 Host registration does not require email sending or a separate domain. Password recovery is not implemented yet, so hosts should keep their password safe.
 
-CI has passed the previous deployed build. The current source update must pass CI and be redeployed before it becomes the live version. The public page and actual media paths need browser/device verification.
+The latest source revision passed CI: dependency installation, TypeScript checks, frontend production build, asset bundling, Worker compilation, deployment artifact packaging and Worker configuration dry-run. That tested build was deployed as Worker deployment `83e65df817014bfbbd0d858f62963cee`. The public page and actual media paths still need browser/device verification.
 
 ## Required secure configuration still outstanding
 
