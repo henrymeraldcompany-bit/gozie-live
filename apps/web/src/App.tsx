@@ -4,13 +4,14 @@ import AdminStudio from "./components/AdminStudio";
 import AuthPanel from "./components/AuthPanel";
 import CameraStudio from "./components/CameraStudio";
 import Viewer from "./components/Viewer";
+import EngineRenderer from "./components/EngineRenderer";
 import { getSupabase } from "./lib/api";
 
-type Mode = "admin" | "camera" | "viewer";
+type Mode = "admin" | "camera" | "viewer" | "engine";
 export default function App() {
   const params = new URLSearchParams(window.location.search);
   const rawMode = params.get("mode");
-  const mode: Mode = rawMode === "camera" || rawMode === "viewer" ? rawMode : "admin";
+  const mode: Mode = rawMode === "camera" || rawMode === "viewer" || rawMode === "engine" ? rawMode : "admin";
   const code = params.get("code") ?? "";
   const supabase = getSupabase();
   const [signedIn, setSignedIn] = useState(false);
@@ -28,6 +29,7 @@ export default function App() {
     return ()=>subscription.unsubscribe();
   }, [supabase]);
 
+  if (mode === "engine") return <EngineRenderer/>;
   if (mode === "camera") return <CameraStudio code={code}/>;
   if (mode === "viewer") return <Viewer code={code}/>;
   if (checking) return <div className="loading-screen"><Radio size={26}/> Loading GOZIE LIVE…</div>;
