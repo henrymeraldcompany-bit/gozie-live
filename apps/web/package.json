@@ -17,7 +17,8 @@
     "@cloudflare/realtimekit": "^2.1.0",
     "@cloudflare/realtimekit-react": "^2.0.4",
     "@cloudflare/realtimekit-react-ui": "^2.0.2",
-    "@cloudflare/realtimekit-recording-sdk": "^0.0.4"
+    "@cloudflare/realtimekit-recording-sdk": "^0.0.4",
+    "hls.js": "^1.7.4"
   },
   "devDependencies": {
     "@types/react": "^19.0.0",
