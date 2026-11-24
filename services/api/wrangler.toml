@@ -6,7 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 APP_ORIGIN = "https://gozie-live.gozielive.workers.dev"
 APP_BASE_PATH = "/gozie-live/"
-REALTIME_SFU_APP_ID = "a15d31f644b96a0376362c254686ea40"
+REALTIMEKIT_ACCOUNT_ID = "d210fdaad025b0bddf6276048c4e1957"
+REALTIMEKIT_APP_ID = "40b677dd-61ec-4310-b75c-f2b66610ee7b"
 
 [[d1_databases]]
 binding = "DB"
