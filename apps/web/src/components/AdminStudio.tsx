@@ -21,7 +21,7 @@ function FeedTile({ participant, onSelect, selected }: { participant: RemotePart
   return <button className={selected ? "feed-tile selected" : "feed-tile"} onClick={()=>onSelect(participant.identity)}>
     <div className="feed-video">
       {video ? <TrackRenderer track={video} label={participant.name || participant.identity}/> : <div className="feed-no-video"><Camera size={28}/></div>}
-      {audio && <span className="feed-audio"><Activity size={12}/> Audio track</span>}
+      {audio && <><TrackRenderer track={audio} label={participant.name || participant.identity+" audio"}/><span className="feed-audio"><Activity size={12}/> Audio track</span></>}
     </div>
     <div className="feed-label"><span><b>{participant.name || participant.identity}</b><small>{participant.identity}</small></span><span className="feed-live-dot"/></div>
     <span className="feed-action">{selected ? "Selected programme source" : "Select as programme source"}</span>
@@ -37,6 +37,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
   const [shares, setShares] = useState<Shares | null>(null);
   const [monitor, setMonitor] = useState<Room | null>(null);
   const [revision, setRevision] = useState(0);
+  const [feedPage, setFeedPage] = useState(0);
   const [selectedSource, setSelectedSource] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -59,6 +60,9 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
   }, [monitor]);
 
   const participants = useMemo(() => monitor ? [...monitor.remoteParticipants.values()] : [], [monitor, revision]);
+  const feedPageSize = 12;
+  const feedPageCount = Math.max(1, Math.ceil(participants.length / feedPageSize));
+  const visibleParticipants = participants.slice(feedPage * feedPageSize, (feedPage + 1) * feedPageSize);
   async function createSession(event: React.FormEvent) {
     event.preventDefault(); setCreating(true); setError(""); setMessage("");
     try {
@@ -135,7 +139,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
       <div className="workspace-label">WORKSPACE</div>
       <div className="workspace-active"><MonitorPlay size={17}/> Production studio</div>
       <div className="sidebar-session-list"><span className="workspace-label">YOUR SESSIONS</span>
-        {sessions.map(item=><button key={item.id} className={selectedId===item.id?"session-nav active":"session-nav"} onClick={()=>{setSelectedId(item.id);setShares(null);setSelectedSource("");}}><span className={item.status==="live"?"feed-live-dot":"status-dot"}/><span>{item.title}</span></button>)}
+        {sessions.map(item=><button key={item.id} className={selectedId===item.id?"session-nav active":"session-nav"} onClick={()=>{setSelectedId(item.id);setShares(null);setSelectedSource("");setFeedPage(0);}}><span className={item.status==="live"?"feed-live-dot":"status-dot"}/><span>{item.title}</span></button>)}
         {sessions.length===0 && <small>No sessions created yet.</small>}
       </div>
       <div className="sidebar-bottom"><ShieldCheck size={17}/> Signed in as {userEmail || "host"}</div>
@@ -176,11 +180,12 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
 
         {activeSession && <>
           <div className="section-heading cameras-heading"><div><span className="eyebrow">LIVE INPUTS</span><h3>Camera monitor</h3></div><div className="section-actions"><span className="muted">{participants.length} active feeds · {contributors.length} admitted</span><button className="secondary-button" disabled={busy} onClick={()=>void connectMonitor()}>{busy?"Connecting…":"Connect monitor"}</button></div></div>
-          {participants.length>0 ? <div className="feed-grid">{participants.map(participant=><FeedTile key={participant.identity} participant={participant} selected={selectedSource===participant.identity} onSelect={identity=>{setSelectedSource(identity);void command("select-source",{participantIdentity:identity});}}/>)}</div> : <div className="empty-grid"><div className="empty-icon"><Video size={26}/></div><h3>No camera previews currently connected</h3><p>Invite contributors and connect the camera monitor. LiveKit must be configured for real feeds to arrive.</p></div>}
+          {participants.length>0 ? <div className="feed-grid">{visibleParticipants.map(participant=><FeedTile key={participant.identity} participant={participant} selected={selectedSource===participant.identity} onSelect={identity=>{setSelectedSource(identity);void command("select-source",{participantIdentity:identity});}}/>)}</div>
+            {participants.length>feedPageSize && <div className="feed-pagination"><span>Showing {feedPage*feedPageSize+1}–{Math.min((feedPage+1)*feedPageSize,participants.length)} of {participants.length} feeds</span><div><button className="secondary-button" disabled={feedPage===0} onClick={()=>setFeedPage(page=>Math.max(0,page-1))}>Previous</button><button className="secondary-button" disabled={feedPage>=feedPageCount-1} onClick={()=>setFeedPage(page=>Math.min(feedPageCount-1,page+1))}>Next</button></div></div> : <div className="empty-grid"><div className="empty-icon"><Video size={26}/></div><h3>No camera previews currently connected</h3><p>Invite contributors and connect the camera monitor. LiveKit must be configured for real feeds to arrive.</p></div>}
           <section className="session-card production-card"><div className="section-heading"><div><span className="eyebrow">PROGRAMME OUTPUT</span><h3>Production controls</h3></div><span className="draft-tag">ENGINE OFFLINE</span></div>
             <div className="production-grid">
               <div><b>Selected source</b><p>{selectedSource || "No camera selected"}</p><small>Selection is saved as a production command; no final switch is applied until the engine is running.</small></div>
-              <div><b>Contributor audio</b><p>Mute commands can be queued for the media engine.</p><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:true})}><VolumeX size={15}/> Mute all contributor audio</button></div>
+              <div><b>Contributor audio</b><p>Mute commands can be queued for the media engine.</p><div className="mix-actions"><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:true})}><VolumeX size={15}/> Mute all</button><button className="secondary-button" onClick={()=>void command("set-audio-mix",{muteAll:false})}><Mic size={15}/> Unmute all</button></div></div>
               <div><b>Master programme</b><p>Final output is published by the independent production engine.</p><span className="offline-text">No programme stream published</span></div>
             </div>
             {contributors.map(person=><div className="contributor-row" key={person.id}><span><b>{person.display_name}</b><small>{person.status}</small></span><button className="secondary-button" onClick={()=>void command("mute-contributor",{contributorId:person.id,muted:!person.audio_muted})}><Mic size={14}/>{person.audio_muted?"Unmute":"Mute"} mic</button></div>)}
