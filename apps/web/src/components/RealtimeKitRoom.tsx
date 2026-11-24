@@ -1,9 +1,13 @@
 import {useEffect,useState} from "react";
 import {Radio,LogOut} from "lucide-react";
-import {useRealtimeKitClient,RealtimeKitProvider} from "@cloudflare/realtimekit-react";
+import {useRealtimeKitClient,RealtimeKitProvider,useRealtimeKitMeeting} from "@cloudflare/realtimekit-react";
 import {RtkMeeting} from "@cloudflare/realtimekit-react-ui";
 
 type Role="host"|"camera";
+function MeetingSurface(){
+ const {meeting}=useRealtimeKitMeeting();
+ return <RtkMeeting mode="fill" meeting={meeting} showSetupScreen={true}/>;
+}
 export default function RealtimeKitRoom({authToken,role,onLeave}:{authToken:string;role:Role;onLeave:()=>void}){
  const [meeting,initMeeting]=useRealtimeKitClient();
  const [error,setError]=useState("");
@@ -22,14 +26,9 @@ export default function RealtimeKitRoom({authToken,role,onLeave}:{authToken:stri
  async function leave(){
   if(leaving)return;
   setLeaving(true);
-  try{
-   await meeting?.leave();
-  }catch(reason){
-   setError(reason instanceof Error?reason.message:"Could not leave the meeting cleanly.");
-  }finally{
-   onLeave();
-   setLeaving(false);
-  }
+  try{await meeting?.leave();}
+  catch(reason){setError(reason instanceof Error?reason.message:"Could not leave the meeting cleanly.");}
+  finally{onLeave();setLeaving(false);}
  }
  return <section className={"rtk-room rtk-room-"+role}>
   <header className="rtk-room-header">
@@ -38,8 +37,6 @@ export default function RealtimeKitRoom({authToken,role,onLeave}:{authToken:stri
   </header>
   {error&&<div className="inline-error">{error}</div>}
   {!meeting?<div className="rtk-room-loading"><Radio size={23}/><span>Connecting to Cloudflare RealtimeKit…</span></div>:
-   <RealtimeKitProvider value={meeting}>
-    <div className="rtk-meeting-frame"><RtkMeeting meeting={meeting} mode="fill" showSetupScreen={true}/></div>
-   </RealtimeKitProvider>}
+   <RealtimeKitProvider value={meeting}><div className="rtk-meeting-frame"><MeetingSurface/></div></RealtimeKitProvider>}
  </section>;
 }
