@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Camera, Mic, MicOff, Radio, ShieldCheck, Video, VideoOff } from "lucide-react";
 import { createLocalTracks, Room } from "livekit-client";
 import type { LocalTrack } from "livekit-client";
@@ -17,34 +17,47 @@ export default function CameraStudio({ code }: { code: string }) {
   const [tracks, setTracks] = useState<LocalTrack[]>([]);
   const preview = useRef<HTMLVideoElement>(null);
 
+  useEffect(() => {
+    if (!connected || !preview.current) return;
+    const videoTrack = tracks.find(track => track.kind === "video");
+    if (!videoTrack) return;
+    videoTrack.attach(preview.current);
+    return () => { videoTrack.detach(preview.current!); };
+  }, [connected, tracks]);
+
   async function join(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
+    let localTracks: LocalTrack[] = [];
+    let nextRoom: Room | null = null;
     try {
       if (!code) throw new Error("This camera link is missing its session code. Ask the host for a new contributor link.");
-      const result = await apiRequest<JoinResult>("/v1/join/contributor", { method: "POST", body: JSON.stringify({ code, displayName }) });
-      const nextRoom = new Room({ adaptiveStream: true, dynacast: true });
+      // Ask for camera/microphone permission before registering this person as connected.
+      localTracks = await createLocalTracks({ audio: true, video: { facingMode: "user", resolution: { width: 1280, height: 720 } } });
+      const result = await apiRequest<JoinResult>("/v1/join/contributor", { method: "POST", body: JSON.stringify({ code, displayName: displayName.trim() }) });
+      nextRoom = new Room({ adaptiveStream: true, dynacast: true });
       await nextRoom.connect(result.livekitUrl, result.token);
-      const localTracks = await createLocalTracks({ audio: true, video: { facingMode: "user", resolution: { width: 1280, height: 720 } } });
       for (const track of localTracks) await nextRoom.localParticipant.publishTrack(track);
-      const videoTrack = localTracks.find(track => track.kind === "video");
-      if (videoTrack && preview.current) videoTrack.attach(preview.current);
       setTracks(localTracks); setRoom(nextRoom); setSessionTitle(result.session.title); setConnected(true);
     } catch (err) {
+      localTracks.forEach(track => { track.detach(); track.stop(); });
+      await nextRoom?.disconnect();
       setError(err instanceof Error ? err.message : "Unable to join the camera room.");
     } finally { setBusy(false); }
   }
   async function toggleCamera() {
     if (!room) return;
-    const next = !cameraOn; await room.localParticipant.setCameraEnabled(next); setCameraOn(next);
+    try { const next = !cameraOn; await room.localParticipant.setCameraEnabled(next); setCameraOn(next); }
+    catch (err) { setError(err instanceof Error ? err.message : "Could not change camera state."); }
   }
   async function toggleMic() {
     if (!room) return;
-    const next = !micOn; await room.localParticipant.setMicrophoneEnabled(next); setMicOn(next);
+    try { const next = !micOn; await room.localParticipant.setMicrophoneEnabled(next); setMicOn(next); }
+    catch (err) { setError(err instanceof Error ? err.message : "Could not change microphone state."); }
   }
   async function leave() {
     tracks.forEach(track => { track.detach(); track.stop(); });
     await room?.disconnect();
-    setTracks([]); setRoom(null); setConnected(false);
+    setTracks([]); setRoom(null); setConnected(false); setCameraOn(true); setMicOn(true);
   }
 
   return <main className="public-shell">
@@ -60,6 +73,7 @@ export default function CameraStudio({ code }: { code: string }) {
         <div className="privacy-note"><ShieldCheck size={17}/> Your camera feed is sent to the host's private contributor room, not directly to viewers.</div>
       </form> : <>
         <div className="self-preview"><video ref={preview} autoPlay playsInline muted/><div className="preview-label"><span className="online-dot"/> CAMERA CONNECTED</div></div>
+        {error && <div className="inline-error">{error}</div>}
         <div className="camera-controls">
           <button className={micOn ? "round-control" : "round-control off"} onClick={toggleMic}>{micOn ? <Mic/> : <MicOff/>}{micOn ? "Mic on" : "Mic off"}</button>
           <button className={cameraOn ? "round-control" : "round-control off"} onClick={toggleCamera}>{cameraOn ? <Video/> : <VideoOff/>}{cameraOn ? "Camera on" : "Camera off"}</button>
