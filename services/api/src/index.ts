@@ -9,11 +9,11 @@ interface D1 { prepare(sql:string):D1Stmt; batch(stmts:D1Stmt[]):Promise<unknown
 interface Bucket { put(key:string,value:ReadableStream|ArrayBuffer|string,opts?:unknown):Promise<unknown>; get(key:string):Promise<{body:ReadableStream|null}|null>; delete(key:string):Promise<void>; }
 interface Env {
  DB:D1; MEDIA_BUCKET:Bucket; SESSION_ROOMS:{idFromName(name:string):unknown;get(id:unknown):{fetch(req:Request):Promise<Response>}};
- REALTIME_SFU_APP_ID:string; REALTIME_SFU_APP_SECRET:string;
+ REALTIMEKIT_ACCOUNT_ID:string; REALTIMEKIT_APP_ID:string; REALTIMEKIT_API_TOKEN:string;
  APP_ORIGIN:string; APP_BASE_PATH:string;
 }
 type User={id:string;email:string;display_name:string;email_verified:number};
-type Session={id:string;owner_id:string;title:string;status:string;scheduled_at:string|null;live_started_at:string|null;ended_at:string|null;contributor_code_hash:string;viewer_code_hash:string;public_id:string;programme_uid?:string|null};
+type Session={id:string;owner_id:string;title:string;status:string;scheduled_at:string|null;live_started_at:string|null;ended_at:string|null;contributor_code_hash:string;viewer_code_hash:string;public_id:string;realtimekit_meeting_id?:string|null;realtimekit_livestream_id?:string|null;playback_url?:string|null;realtimekit_recording_id?:string|null;realtimekit_host_participant_id?:string|null};
 const enc=new TextEncoder();
 const now=()=>new Date().toISOString();
 let appAssetsPromise: Promise<Record<string,string>> | null = null;
@@ -39,7 +39,39 @@ async function input<T>(req:Request):Promise<T>{try{return await req.json() as T
 function appUrl(env:Env,params:Record<string,string>){const base=(env.APP_BASE_PATH||"/").startsWith("/")?env.APP_BASE_PATH:"/"+env.APP_BASE_PATH;const u=new URL(base,env.APP_ORIGIN);u.search=new URLSearchParams(params).toString();return u.toString();}
 async function auth(req:Request,env:Env):Promise<User>{const raw=cookie(req);if(!raw)throw new Response("Sign in to continue.",{status:401});const row=await env.DB.prepare("SELECT u.id,u.email,u.display_name,u.email_verified FROM auth_sessions a JOIN users u ON u.id=a.user_id WHERE a.id=? AND a.expires_at>?").bind(await hash(raw),now()).first<User>();if(!row)throw new Response("Session expired. Sign in again.",{status:401});if(!row.email_verified)throw new Response("Verify your email before signing in.",{status:403});return row;}
 async function owner(req:Request,env:Env,id:string){const user=await auth(req,env);const session=await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE id=? AND owner_id=?").bind(id,user.id).first<Session>();if(!session)throw new Response("Session not found.",{status:404});return {user,session};}
-async function sfu(env:Env,path:string,method="POST",data?:unknown){if(!env.REALTIME_SFU_APP_ID||!env.REALTIME_SFU_APP_SECRET)throw new Response("Cloudflare Realtime SFU is not configured.",{status:503});const r=await fetch("https://rtc.live.cloudflare.com/v1/apps/"+env.REALTIME_SFU_APP_ID+path,{method,headers:{authorization:"Bearer "+env.REALTIME_SFU_APP_SECRET,"content-type":"application/json"},body:data===undefined?undefined:JSON.stringify(data)});const t=await r.text();let d:any={};try{d=t?JSON.parse(t):{};}catch{d={error:t};}if(!r.ok)throw new Error("Realtime SFU error "+r.status+": "+String(d.error||t).slice(0,350));return d;}
+async function realtimeKit(env:Env,path:string,method="POST",payload?:unknown){
+ if(!env.REALTIMEKIT_API_TOKEN||!env.REALTIMEKIT_ACCOUNT_ID||!env.REALTIMEKIT_APP_ID){
+  throw new Response("Cloudflare RealtimeKit is not configured. Add the Realtime Admin API token as the REALTIMEKIT_API_TOKEN Worker secret.",{status:503});
+ }
+ const endpoint="https://api.cloudflare.com/client/v4/accounts/"+env.REALTIMEKIT_ACCOUNT_ID+"/realtime/kit/"+env.REALTIMEKIT_APP_ID+path;
+ const response=await fetch(endpoint,{method,headers:{authorization:"Bearer "+env.REALTIMEKIT_API_TOKEN,"content-type":"application/json"},body:payload===undefined?undefined:JSON.stringify(payload)});
+ const raw=await response.text();let data:any={};try{data=raw?JSON.parse(raw):{};}catch{data={error:raw};}
+ if(!response.ok||data.success===false)throw new Error("Cloudflare RealtimeKit API error ("+response.status+"): "+String(data.errors?.[0]?.message||data.error||raw).slice(0,400));
+ return data.data??data;
+}
+async function ensureMeeting(env:Env,session:Session):Promise<string>{
+ if(session.realtimekit_meeting_id)return session.realtimekit_meeting_id;
+ const created=await realtimeKit(env,"/meetings","POST",{title:session.title,session_keep_alive_time_in_secs:600,live_stream_on_start:false,record_on_start:false});
+ if(!created.id)throw new Error("RealtimeKit did not return a meeting ID.");
+ await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_meeting_id=? WHERE id=?").bind(created.id,session.id).run();
+ session.realtimekit_meeting_id=created.id;
+ return created.id as string;
+}
+async function addRealtimeKitParticipant(env:Env,meetingId:string,identity:string,name:string,preset:string){
+ return await realtimeKit(env,"/meetings/"+encodeURIComponent(meetingId)+"/participants","POST",{name,preset_name:preset,custom_participant_id:identity});
+}
+async function ensureHostParticipant(env:Env,session:Session,user:User){
+ const meetingId=session.realtimekit_meeting_id;
+ if(!meetingId)throw new Response("Start the session before opening the host studio.",409);
+ if(session.realtimekit_host_participant_id){
+  const refreshed=await realtimeKit(env,"/meetings/"+encodeURIComponent(meetingId)+"/participants/"+encodeURIComponent(session.realtimekit_host_participant_id)+"/token","POST",{});
+  if(refreshed.token)return {meetingId,participantId:session.realtimekit_host_participant_id,authToken:refreshed.token};
+ }
+ const participant=await addRealtimeKitParticipant(env,meetingId,"host-"+user.id,user.display_name||"GOZIE LIVE Host","gozie_host");
+ if(!participant.id||!participant.token)throw new Error("RealtimeKit did not return host participant credentials.");
+ await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_host_participant_id=? WHERE id=?").bind(participant.id,session.id).run();
+ return {meetingId,participantId:participant.id,authToken:participant.token};
+}
 async function byCode(env:Env,code:string,type:"viewer"|"contributor"){if(!code||code.length>160)throw new Response("Invalid share link.",{status:400});const col=type==="viewer"?"viewer_code_hash":"contributor_code_hash";const s=await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE "+col+"=?").bind(await hash(code)).first<Session>();if(!s||s.status==="ended")throw new Response("Share link invalid or expired.",{status:404});return s;}
 function room(env:Env,id:string){return env.SESSION_ROOMS.get(env.SESSION_ROOMS.idFromName(id));}
 async function roomPost(env:Env,sid:string,action:string,data:unknown){return room(env,sid).fetch(new Request("https://session/"+action,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data)}));}
@@ -53,7 +85,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
    service:"GOZIE LIVE",
    database,
    r2:env.MEDIA_BUCKET?"configured":"missing",
-   realtimeSfu:env.REALTIME_SFU_APP_SECRET?"configured":"needs-worker-secret",
+   realtimeKit:env.REALTIMEKIT_API_TOKEN?"configured":"needs-REALTIMEKIT_API_TOKEN-secret",
    emailVerification:"not-required-password-based-host-accounts",
    time:now()
   };
@@ -90,37 +122,33 @@ async function handle(req:Request,env:Env):Promise<Response>{
   await env.DB.prepare("INSERT INTO contributors(id,session_id,display_name,status,last_seen_at,leave_secret_hash) VALUES(?,?,?,'connected',?,?)").bind(contributorId,s.id,name,now(),leaveHash).run();
   return json({session:{id:s.id,title:s.title},contributor:{id:contributorId,display_name:name},leaveSecret},201);
  }
- if(path==="/v1/media/publish"&&method==="POST"){
-  const x=await input<{code:string;contributorId:string;leaveSecret:string;sessionDescription:{type:string;sdp:string};tracks:Array<{mid:string;trackName:string;kind:string}>}>(req),s=await byCode(env,x.code,"contributor");
-  const c=await env.DB.prepare("SELECT id,leave_secret_hash FROM contributors WHERE id=? AND session_id=?").bind(x.contributorId,s.id).first<{id:string;leave_secret_hash:string}>();
-  if(!c||!equal(c.leave_secret_hash,await hash(x.leaveSecret||"")))return fail("Contributor access denied.",403);
-  if(!x.sessionDescription?.sdp||!Array.isArray(x.tracks)||!x.tracks.length||x.tracks.length>2)return fail("Missing media offer or tracks.");
-  const created=await sfu(env,"/sessions/new"),sfuId=created.sessionId;
-  const result=await sfu(env,"/sessions/"+sfuId+"/tracks/new","POST",{sessionDescription:x.sessionDescription,tracks:x.tracks.map(t=>({location:"local",mid:t.mid,trackName:t.trackName}))});
-  await env.DB.prepare("UPDATE contributors SET publisher_session_id=?,status='publishing',last_seen_at=? WHERE id=?").bind(sfuId,now(),c.id).run();
-  await env.DB.batch(x.tracks.map(t=>env.DB.prepare("INSERT OR REPLACE INTO contributor_publications(id,contributor_id,session_id,sfu_session_id,track_name,kind) VALUES(?,?,?,?,?,?)").bind(uuid(),c.id,s.id,sfuId,t.trackName,t.kind)));
-  await roomPost(env,s.id,"publish",{contributorId:c.id,publisherSessionId:sfuId});
-  return json({sessionId:sfuId,sessionDescription:result.sessionDescription},201);
+ if(path==="/v1/join/contributor"&&method==="POST"){
+  const x=await input<{code?:string;displayName?:string}>(req),s=await byCode(env,x.code||"","contributor"),name=(x.displayName||"").trim();
+  if(!name||name.length>80)return fail("Enter a display name up to 80 characters.");
+  if(!s.realtimekit_meeting_id||s.status!=="live")return fail("The host has not started this broadcast yet. Please try again when it is live.",409);
+  const contributorId=uuid(),leaveSecret=random(),leaveHash=await hash(leaveSecret);
+  const admission=await roomPost(env,s.id,"admit",{contributorId,displayName:name,leaveSecretHash:leaveHash,maximum:200});
+  if(!admission.ok)return fail("This session has reached its 200-camera limit.",429);
+  try{
+   const participant=await addRealtimeKitParticipant(env,s.realtimekit_meeting_id,contributorId,name,"gozie_camera");
+   if(!participant.id||!participant.token)throw new Error("RealtimeKit did not return camera participant credentials.");
+   await env.DB.prepare("INSERT INTO contributors(id,session_id,display_name,status,last_seen_at,leave_secret_hash,realtimekit_participant_id) VALUES(?,?,?,'connected',?,?,?)").bind(contributorId,s.id,name,now(),leaveHash,participant.id).run();
+   return json({session:{id:s.id,title:s.title},contributor:{id:contributorId,display_name:name},leaveSecret,authToken:participant.token,meetingId:s.realtimekit_meeting_id},201);
+  }catch(error){
+   await roomPost(env,s.id,"leave",{contributorId,leaveSecretHash:leaveHash}).catch(()=>undefined);
+   throw error;
+  }
  }
  if(path==="/v1/contributors/presence"&&method==="POST"){
-  const x=await input<{contributorId:string;leaveSecret:string;leave?:boolean}>(req),c=await env.DB.prepare("SELECT id,session_id,leave_secret_hash FROM contributors WHERE id=?").bind(x.contributorId).first<{id:string;session_id:string;leave_secret_hash:string}>();
+  const x=await input<{contributorId:string;leaveSecret:string;leave?:boolean}>(req),c=await env.DB.prepare("SELECT id,session_id,leave_secret_hash,realtimekit_participant_id FROM contributors WHERE id=?").bind(x.contributorId).first<{id:string;session_id:string;leave_secret_hash:string;realtimekit_participant_id:string|null}>();
   if(!c||!equal(c.leave_secret_hash,await hash(x.leaveSecret||"")))return fail("Invalid contributor presence credentials.",403);
+  const session=await env.DB.prepare("SELECT realtimekit_meeting_id FROM broadcast_sessions WHERE id=?").bind(c.session_id).first<{realtimekit_meeting_id:string|null}>();
   await roomPost(env,c.session_id,x.leave?"leave":"heartbeat",{contributorId:c.id,leaveSecretHash:c.leave_secret_hash});
-  await env.DB.prepare("UPDATE contributors SET status=?,last_seen_at=? WHERE id=?").bind(x.leave?"disconnected":"publishing",now(),c.id).run();return json({ok:true});
- }
- if(path==="/v1/media/renegotiate"&&method==="POST"){
-  const x=await input<{subscriptionId:string;sessionDescription:{type:string;sdp:string}}>(req),u=await auth(req,env);
-  const sub=await env.DB.prepare("SELECT sfu_session_id FROM media_subscriptions WHERE id=? AND owner_id=?").bind(x.subscriptionId,u.id).first<{sfu_session_id:string}>();
-  if(!sub)return fail("Media subscription not found.",404);await sfu(env,"/sessions/"+sub.sfu_session_id+"/renegotiate","PUT",{sessionDescription:x.sessionDescription});return json({ok:true});
- }
- const subscribe=path.match(/^\/v1\/sessions\/([0-9a-f-]+)\/subscribe$/i);
- if(subscribe&&method==="POST"){
-  const {user,session}=await owner(req,env,subscribe[1]),x=await input<{contributorIds:string[]}>(req),ids=(x.contributorIds||[]).slice(0,12);if(!ids.length)return fail("Select cameras to preview.");
-  const marks=ids.map(()=>"?").join(","),rows=await env.DB.prepare("SELECT c.id,c.display_name,cp.sfu_session_id,cp.track_name,cp.kind FROM contributors c JOIN contributor_publications cp ON cp.contributor_id=c.id WHERE c.session_id=? AND c.status='publishing' AND c.id IN ("+marks+") ORDER BY c.created_at").bind(session.id,...ids).all<{id:string;display_name:string;sfu_session_id:string;track_name:string;kind:string}>();
-  if(!rows.results.length)return fail("No active camera feeds are ready.",409);
-  const created=await sfu(env,"/sessions/new"),sid=created.sessionId,tracks=rows.results.map(r=>({location:"remote",sessionId:r.sfu_session_id,trackName:r.track_name}));
-  const result=await sfu(env,"/sessions/"+sid+"/tracks/new","POST",{tracks}),subscriptionId=uuid();await env.DB.prepare("INSERT INTO media_subscriptions(id,session_id,owner_id,sfu_session_id) VALUES(?,?,?,?)").bind(subscriptionId,session.id,user.id,sid).run();
-  return json({subscriptionId,sessionId:sid,sessionDescription:result.sessionDescription,trackMap:rows.results.map((r,i)=>({mid:result.tracks?.[i]?.mid,contributorId:r.id,displayName:r.display_name,trackName:r.track_name,kind:r.kind}))});
+  if(x.leave&&c.realtimekit_participant_id&&session?.realtimekit_meeting_id){
+   await realtimeKit(env,"/meetings/"+encodeURIComponent(session.realtimekit_meeting_id)+"/participants/"+encodeURIComponent(c.realtimekit_participant_id),"DELETE").catch(()=>undefined);
+  }
+  await env.DB.prepare("UPDATE contributors SET status=?,last_seen_at=? WHERE id=?").bind(x.leave?"disconnected":"publishing",now(),c.id).run();
+  return json({ok:true});
  }
  const sm=path.match(/^\/v1\/sessions\/([0-9a-f-]+)(?:\/(.*))?$/i);
  if(sm){
