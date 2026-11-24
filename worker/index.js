@@ -78,7 +78,7 @@ async function handle(req, env) {
             database,
             r2: env.MEDIA_BUCKET ? "configured" : "missing",
             realtimeSfu: env.REALTIME_SFU_APP_SECRET ? "configured" : "needs-worker-secret",
-            emailVerification: env.EMAIL && env.EMAIL_FROM ? "configured" : "needs-sending-domain-and-email-binding",
+            emailVerification: "not-required-password-based-host-accounts",
             time: now()
         };
         return json(status, status.ok ? 200 : 503);
@@ -91,42 +91,16 @@ async function handle(req, env) {
             return fail("Display name must be 2–80 characters.");
         if ((x.password || "").length < 10)
             return fail("Password must be at least 10 characters.");
-        if (!env.EMAIL || !env.EMAIL_FROM)
-            return fail("Email verification is not active yet. Onboard a sending domain in Cloudflare Email Service first.", 503);
         if (await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first())
             return fail("An account already exists for this email.", 409);
         const userId = uuid();
-        await env.DB.prepare("INSERT INTO users(id,email,password_hash,display_name,email_verified) VALUES(?,?,?,?,0)").bind(userId, email, await passHash(x.password), name).run();
-        const code = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1000000).padStart(6, "0"), digest = await hash(email + ":" + code + ":" + env.AUTH_SIGNING_SECRET), expires = new Date(Date.now() + 900000).toISOString();
-        await env.DB.prepare("INSERT OR REPLACE INTO email_verification_codes(email,code_hash,expires_at,attempts) VALUES(?,?,?,0)").bind(email, digest, expires).run();
-        try {
-            await env.EMAIL.send({ to: email, from: env.EMAIL_FROM, subject: "Verify your GOZIE LIVE account", text: "Your verification code is " + code + ". It expires in 15 minutes.", html: "<p>Your GOZIE LIVE verification code:</p><h2>" + code + "</h2><p>Expires in 15 minutes.</p>" });
-        }
-        catch {
-            await env.DB.prepare("DELETE FROM users WHERE id=?").bind(userId).run();
-            await env.DB.prepare("DELETE FROM email_verification_codes WHERE email=?").bind(email).run();
-            return fail("Cloudflare Email Service rejected the sender. Check the sending domain and EMAIL_FROM setting.", 503);
-        }
-        return json({ ok: true, message: "Verification code sent." }, 201);
-    }
-    if (path === "/v1/auth/verify" && method === "POST") {
-        const x = await input(req), email = (x.email || "").trim().toLowerCase(), code = (x.code || "").trim();
-        const row = await env.DB.prepare("SELECT code_hash,expires_at,attempts FROM email_verification_codes WHERE email=?").bind(email).first();
-        if (!row || row.expires_at < now() || row.attempts >= 5)
-            return fail("Verification code expired. Register again.", 400);
-        if (!/^\d{6}$/.test(code) || !equal(row.code_hash, await hash(email + ":" + code + ":" + env.AUTH_SIGNING_SECRET))) {
-            await env.DB.prepare("UPDATE email_verification_codes SET attempts=attempts+1 WHERE email=?").bind(email).run();
-            return fail("Incorrect verification code.", 400);
-        }
-        await env.DB.batch([env.DB.prepare("UPDATE users SET email_verified=1 WHERE email=?").bind(email), env.DB.prepare("DELETE FROM email_verification_codes WHERE email=?").bind(email)]);
-        return json({ ok: true, message: "Email verified. You can sign in." });
+        await env.DB.prepare("INSERT INTO users(id,email,password_hash,display_name,email_verified) VALUES(?,?,?,?,1)").bind(userId, email, await passHash(x.password), name).run();
+        return json({ ok: true, message: "Your GOZIE LIVE host account has been created. Sign in to continue." }, 201);
     }
     if (path === "/v1/auth/login" && method === "POST") {
         const x = await input(req), u = await env.DB.prepare("SELECT id,email,password_hash,email_verified FROM users WHERE email=?").bind((x.email || "").trim().toLowerCase()).first();
         if (!u || !await passCheck(x.password || "", u.password_hash))
             return fail("Email or password is incorrect.", 401);
-        if (!u.email_verified)
-            return fail("Verify your email before signing in.", 403);
         const raw = random(), expires = new Date(Date.now() + 30 * 86400000).toISOString();
         await env.DB.prepare("INSERT INTO auth_sessions(id,user_id,expires_at) VALUES(?,?,?)").bind(await hash(raw), u.id, expires).run();
         return json({ ok: true, email: u.email }, 200, { "set-cookie": setCookie(raw, 2592000) });
