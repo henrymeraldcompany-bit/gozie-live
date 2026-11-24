@@ -6,7 +6,7 @@ GOZIE LIVE is a multi-camera streaming and broadcast-production application buil
 
 **[GOZIE LIVE application](https://gozie-live.gozielive.workers.dev/gozie-live/)**
 
-The GitHub repository home page is the source-code and README page. It is not the application website.
+The GitHub repository home page shows its README and source code. That is normal for a repository. Use the Cloudflare application link above to open the app.
 
 ## Cloudflare infrastructure
 
@@ -29,9 +29,9 @@ There is no Supabase or LiveKit integration in the current application code.
 
 ## Current status
 
-The Cloudflare Worker and application bundle are deployed. The D1, R2 and Durable Object bindings are configured, and the hourly cleanup trigger is set. Host registration still requires a verified Cloudflare Email Sending domain and Worker secrets. Camera publishing still needs the Realtime SFU app secret and a real phone test.
+The Cloudflare Worker and application bundle are deployed. The D1, R2 and Durable Object bindings are configured, and the hourly cleanup trigger is set. Host accounts use D1-backed password registration and login. Camera publishing still needs the Realtime SFU app secret to be installed as a Worker secret and needs a real phone test.
 
-The independent programme compositor, one final viewer stream, programme audio mixing and final recording are not yet deployed. The 200-camera figure is a configured limit, not a tested capacity result.
+The independent programme compositor, one final viewer stream, programme audio mixing and final recording are not yet deployed. The 200-camera figure is a configured admission ceiling, not a tested capacity result.
 
 See [the Cloudflare deployment status](docs/deployment/plan.md).
 
