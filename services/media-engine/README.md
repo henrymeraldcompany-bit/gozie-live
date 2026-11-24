@@ -1,20 +1,33 @@
-# GOZIE LIVE production renderer
+# GOZIE LIVE programme engine — pending implementation
 
-The current implementation uses LiveKit's server-managed Egress compositor rather than running media processing inside the host's browser.
+The programme compositor is **not deployed yet**. This folder is reserved for the server-side media-production service that will run independently of the host's browser.
 
-## Implemented orchestration path
+## Required responsibilities
 
-- The API creates a dedicated programme-room RTMP ingress.
-- It starts LiveKit composite Egress on the contributor room with the custom template URL `/?mode=engine&sessionId=...&controlCode=...`.
-- LiveKit appends the recorder's room URL and short-lived recorder token to the template URL. The template connects to the contributor room and signals `START_RECORDING` after the connection succeeds.
-- The renderer shows the currently selected camera, or replaces that picture with an uploaded image/video. Contributor audio tracks are independently attached; the host's mute state is polled from the API.
-- The same Egress outputs the composition to the programme-room RTMP ingress and, when R2 S3 credentials are configured, to an MP4 file in private R2.
-- The API stops Egress when the host ends the session, checks for the finished R2 object, registers recording metadata, and sets expiry to seven days after the session end.
+- Subscribe to authorized contributor camera and microphone publications through Cloudflare Realtime.
+- Select one camera as the programme picture, with a designed fallback slate when no camera is selected.
+- Replace the programme picture with an uploaded image or video while contributor streams continue.
+- Mix selected contributor microphones and imported audio with per-source gain, mute controls, master gain and a limiter.
+- Produce one final programme output for all viewers.
+- Record the final programme output and store it in private Cloudflare R2.
+- Notify the API when a recording is finalized so the API can set expiry to seven days after the session ends.
 
-## Important boundaries
+## Cloudflare-only target
 
-This integration is committed but has not been deployed or tested against a real LiveKit Cloud project. It depends on the frontend being deployed and `APP_ORIGIN` being set to that origin. It also depends on LiveKit Egress/Ingress being enabled for the project.
+The application API is Cloudflare Workers with D1, Durable Objects and R2. Realtime camera transport currently targets Cloudflare Realtime SFU.
 
-R2 recording requires `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_S3_ENDPOINT` as Worker secrets. Without them, the API may start the live programme output, but no recording file is requested.
+The SFU forwards WebRTC tracks but does not perform production switching or audio mixing. Its WebSocket video adapter emits JPEG frames at a low snapshot rate and is not suitable as a continuous 30 fps video input for a compositor. Do not use that adapter as the programme encoder.
 
-A 100–200 contributor target needs progressive load tests. Egress decode/composition, SFU bandwidth, R2 upload, network quality and viewer distribution need real measurements. The admin monitor is paginated to avoid attempting to render 200 full-resolution camera previews on a phone. Mobile operating systems can still suspend contributor capture when a phone is locked or the browser is backgrounded.
+The candidate managed option is Cloudflare RealtimeKit's composite recording and RTMP livestream export with a custom recording layout. This must be tested for camera selection, role permissions, output continuity, audio routing, participant scale and delivery before replacing the current SFU implementation. A custom Cloudflare Container compositor remains an alternative if managed features cannot satisfy those requirements.
+
+## Acceptance criteria
+
+- The production engine continues when the host closes the admin page.
+- Switching selected camera changes the same final programme for every viewer.
+- Audio mute/gain commands affect the programme mix, not only the host's preview.
+- Uploaded media replaces the programme picture or enters the audio mix as requested.
+- Recording and final output recover from host disconnects and short network interruptions.
+- The engine reports health, errors, resource use and output latency.
+- Tests cover multiple camera phones and progressively scale toward 200 contributors.
+
+Until those tests pass, the production output, recording, and viewer playback must be labelled unavailable.
