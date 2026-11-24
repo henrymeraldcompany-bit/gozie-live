@@ -175,11 +175,11 @@ async function handle(request: Request, env: Env): Promise<Response> {
     if (!displayName || displayName.length > 80) return fail("Enter a display name (maximum 80 characters).");
     const session = await findSessionByCode(env, body.code ?? "", "contributor");
     const identity = "cam-" + crypto.randomUUID();
+    const token = await liveKitToken(env, { identity, name: displayName, room: sessionRoom(session.id, "contributors"), canPublish: true, canSubscribe: false });
     const rows = await db<ContributorRow[]>(env, "contributors", {
       method: "POST", headers: { prefer: "return=representation" },
       body: JSON.stringify({ session_id: session.id, display_name: displayName, provider_identity: identity, status: "connected" })
     });
-    const token = await liveKitToken(env, { identity, name: displayName, room: sessionRoom(session.id, "contributors"), canPublish: true, canSubscribe: false });
     return json({ session: { id: session.id, title: session.title }, contributor: rows[0], livekitUrl: env.LIVEKIT_URL, token }, 201);
   }
   if (joinViewer && request.method === "POST") {
@@ -216,6 +216,18 @@ async function handle(request: Request, env: Env): Promise<Response> {
         db<Array<{ id: string }>>(env, "viewer_presence?session_id=eq." + id + "&expires_at=gt." + encodeURIComponent(nowIso()) + "&select=id")
       ]);
       return json({ session, contributors, assets, recordings, viewerCount: viewers.length, mediaEngine: "not-connected" });
+    }
+    if (action === "share-links" && request.method === "POST") {
+      const contributorCode = randomCode();
+      const viewerCode = randomCode();
+      await db(env, "broadcast_sessions?id=eq." + id, {
+        method: "PATCH", headers: { prefer: "return=minimal" },
+        body: JSON.stringify({ contributor_code_hash: await sha256(contributorCode), viewer_code_hash: await sha256(viewerCode) })
+      });
+      return json({
+        contributorUrl: new URL("/?mode=camera&code=" + encodeURIComponent(contributorCode), env.APP_ORIGIN).toString(),
+        viewerUrl: new URL("/?mode=viewer&code=" + encodeURIComponent(viewerCode), env.APP_ORIGIN).toString()
+      });
     }
     if (action === "owner-tokens" && request.method === "POST") return json(await issueOwnerTokens(env, user, session));
     if (action === "start" && request.method === "POST") {
