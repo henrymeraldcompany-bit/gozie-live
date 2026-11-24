@@ -1,33 +1,29 @@
-# GOZIE LIVE architecture
-
-## Media flow
-
-1. Admin authenticates through Supabase Auth and creates a session in the API. Contributor admission is transactionally limited to 200 active slots per session; camera clients heartbeat every 20 seconds and presence older than 60 seconds is treated as stale.
-2. The API returns two independent share links: contributor and viewer.
-3. Each contributor receives a short-lived LiveKit token restricted to publishing in the contributor room, without subscribing to other cameras.
-4. Admin receives subscribe-only access to the contributor room for monitoring.
-5. A separately hosted production engine subscribes to contributor inputs, processes source/audio commands, composites one final programme, and publishes it to a separate programme room.
-6. Viewers receive subscribe-only tokens for the programme room. They cannot publish and cannot join the raw contributor room.
-7. The engine records the same final programme output. After session end, the recording is available until seven days after the recorded end time.
-8. An hourly trusted Worker job deletes expired recording objects from private R2 storage and marks their rows deleted.
+# GOZIE LIVE architecture — Cloudflare only
 
 ## Components
 
-- Web app: Admin Studio, Camera Studio, Viewer.
-- API: authentication, session lifecycle, token issuance, R2 media assets, viewer presence, production command queue, recording metadata.
-- SFU: LiveKit (project still needs provisioning).
-- Production engine: dedicated media compositor/mixer and recorder (not yet implemented).
-- PostgreSQL: sessions, contributors, media assets, production commands, viewer presence and recording metadata (Supabase project still needs provisioning).
-- Object storage: private Cloudflare R2 bucket provisioned as `gozie-live-media`.
+- **Workers + Static Assets:** serves the React application and same-origin API.
+- **D1:** host accounts, sessions, contributors, subscriptions, media metadata, and recordings.
+- **Durable Objects:** each session gets its own coordinator for active camera admission and presence.
+- **Realtime SFU:** receives camera/microphone publications and forwards selected tracks to the host monitor.
+- **R2:** private image/video/audio assets and, after the compositor is ready, final-programme recording files.
+- **Cron Trigger:** expires recordings seven days after session end.
+- **Cloudflare Containers (planned):** independent programme compositor for switching, audio mixing, overlays, encoding and recording.
 
-## Security boundaries
+## Media flow
 
-Viewer tokens can subscribe only and use the dedicated programme room. Contributor tokens can publish only to the contributor room and cannot subscribe. The admin receives monitor access to the contributor room and subscribe access to the programme room. Service secrets stay in Worker secrets, not browser variables or Git.
+1. Host signs in through the D1-backed API and creates a session.
+2. API issues separate contributor and viewer share links with high-entropy codes.
+3. Contributor browser reserves one of 200 session slots through the session Durable Object, then publishes camera/microphone tracks to Realtime SFU.
+4. Host subscribes to up to 12 contributor feeds at a time for monitoring.
+5. The planned server-side compositor will subscribe to selected camera inputs, apply source/mute commands and produce a single programme output independently of the host browser.
+6. Viewers will subscribe only to that final programme output, not the raw contributor room.
+7. The compositor will record the final output into private R2. After session end, expiry is calculated as end time plus seven days; Cron removes expired objects.
 
-The API verifies the admin JWT with Supabase Auth before using server-side database credentials. Public share codes are high-entropy bearer links; anyone who receives a contributor link can publish to that session, so links should be shared only with intended contributors.
+## Honest implementation boundary
 
-## Reliability and capacity
+The D1-backed host/session API, contributor admission, browser WebRTC publishing, host preview subscription and R2 uploads have code paths. Email verification still awaits an onboarded Cloudflare sending domain. The independent compositor, final viewer stream, full audio mixer and end-to-end programme recording are not deployed. Do not treat the broadcast system as production-ready until they are implemented and tested.
 
-The admin browser is a control surface, not the media server. The production engine must own the broadcast lifecycle and be supervised independently. Camera capture can still be suspended by mobile operating systems when a contributor backgrounds or locks their phone.
+## Capacity and reliability
 
-A 100–200 camera target requires progressive load tests. Admin monitoring should use low-resolution previews and pagination; displaying 200 full-resolution feeds simultaneously is not a realistic phone workload. Viewer capacity is a separate scaling dimension. Do not promise zero latency; measure source-to-preview and source-switch-to-viewer delay on representative networks.
+The 200 camera limit is an admission ceiling, not proof of 200 simultaneous streams. Test in stages and separately load-test viewers. Preview pages are paginated to 12 feeds. Mobile operating systems can pause camera capture when a phone locks or the browser backgrounds.
