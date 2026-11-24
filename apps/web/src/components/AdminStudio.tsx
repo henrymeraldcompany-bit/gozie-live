@@ -66,8 +66,11 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
     return () => window.clearInterval(poll);
   }, [selectedId, refreshDetail, refreshSessions]);
   useEffect(() => {
-    return () => { void monitor?.disconnect(); void programMonitor?.disconnect(); };
-  }, [monitor, programMonitor]);
+    return () => { void monitor?.disconnect(); };
+  }, [monitor]);
+  useEffect(() => {
+    return () => { void programMonitor?.disconnect(); };
+  }, [programMonitor]);
 
   const participants = useMemo(() => monitor ? [...monitor.remoteParticipants.values()] : [], [monitor, revision]);
   const programParticipants = useMemo(() => programMonitor ? [...programMonitor.remoteParticipants.values()] : [], [programMonitor, programRevision]);
@@ -196,7 +199,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
           <section className="session-card">
             <div className="section-heading"><div><span className="eyebrow">SELECTED SESSION</span><h3>{activeSession?.title ?? "Choose a session"}</h3></div><span className={isLive?"live-tag":"draft-tag"}>{activeSession?.status?.toUpperCase() ?? "NO SESSION"}</span></div>
             {activeSession ? <>
-              <div className="session-meta"><span><Users size={15}/>{contributors.length} contributors</span><span><Eye size={15}/>{detail?.viewerCount ?? 0} viewers</span><span><Activity size={15}/>{detail?.mediaEngine==="running"?"Engine running":detail?.mediaEngine==="failed"?"Engine failed":"Engine not started"}</span></div>
+              <div className="session-meta"><span><Users size={15}/>{contributors.filter(person=>person.status==="connected" || person.status==="publishing").length} active contributors</span><span><Eye size={15}/>{detail?.viewerCount ?? 0} viewers</span><span><Activity size={15}/>{detail?.mediaEngine==="running"?"Engine running":detail?.mediaEngine==="failed"?"Engine failed":"Engine not started"}</span></div>
               <div className="action-row">
                 <button className="secondary-button" onClick={()=>void generateLinks()}>Generate share links</button>
                 {activeSession.status!=="ended" && <button className="primary-button" onClick={()=>void sessionAction(isLive?"end":"start")}>{isLive?"End session":"Mark session live"}</button>}
@@ -211,7 +214,7 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
         </div></section>}
 
         {activeSession && <>
-          <div className="section-heading cameras-heading"><div><span className="eyebrow">LIVE INPUTS</span><h3>Camera monitor</h3></div><div className="section-actions"><span className="muted">{participants.length} active feeds · {contributors.length} admitted</span><button className="secondary-button" disabled={busy} onClick={()=>void connectMonitor()}>{busy?"Connecting…":"Connect monitor"}</button></div></div>
+          <div className="section-heading cameras-heading"><div><span className="eyebrow">LIVE INPUTS</span><h3>Camera monitor</h3></div><div className="section-actions"><span className="muted">{participants.length} active feeds · {contributors.length} admitted total</span><button className="secondary-button" disabled={busy} onClick={()=>void connectMonitor()}>{busy?"Connecting…":"Connect monitor"}</button></div></div>
           {participants.length > 0 ? <>
             <div className="feed-grid">{visibleParticipants.map(participant=><FeedTile key={participant.identity} participant={participant} selected={selectedSource===participant.identity} onSelect={identity=>{setSelectedSource(identity);void command("select-source",{participantIdentity:identity});}}/>)}</div>
             {participants.length > feedPageSize && <div className="feed-pagination"><span>Showing {feedPage*feedPageSize+1}–{Math.min((feedPage+1)*feedPageSize,participants.length)} of {participants.length} feeds</span><div><button className="secondary-button" disabled={feedPage===0} onClick={()=>setFeedPage(page=>Math.max(0,page-1))}>Previous</button><button className="secondary-button" disabled={feedPage>=feedPageCount-1} onClick={()=>setFeedPage(page=>Math.min(feedPageCount-1,page+1))}>Next</button></div></div>}
