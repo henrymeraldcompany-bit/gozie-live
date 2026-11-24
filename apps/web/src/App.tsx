@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Activity, Camera, CircleHelp, Clapperboard, Eye, LayoutDashboard, Radio, Settings, ShieldCheck, Users, Video } from "lucide-react";
+import { Activity, Camera, CircleHelp, Clapperboard, Eye, LayoutDashboard, Radio, ShieldCheck, Users, Video } from "lucide-react";
 
 type Studio = "admin" | "camera" | "viewer";
 
