@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from "react";
-import {Camera,Radio,ShieldCheck} from "lucide-react";
+import {Radio,ShieldCheck} from "lucide-react";
 import {apiRequest} from "../lib/api";
 import RealtimeKitRoom from "./RealtimeKitRoom";
 
@@ -21,7 +21,6 @@ export default function CameraStudio({code}:{code:string}){
  const [error,setError]=useState("");
  const [notice,setNotice]=useState("");
  const intervalRef=useRef<number|null>(null);
- const joinedRef=useRef(false);
 
  useEffect(()=>{
   return()=>{
@@ -45,7 +44,6 @@ export default function CameraStudio({code}:{code:string}){
    setContributorId(result.contributor.id);
    setLeaveSecret(result.leaveSecret);
    setAuthToken(result.authToken);
-   joinedRef.current=true;
    setNotice("Your camera account is admitted. Allow camera and microphone access in the meeting window.");
   }catch(reason){
    setError(reason instanceof Error?reason.message:"Could not join the camera session.");
@@ -64,7 +62,7 @@ export default function CameraStudio({code}:{code:string}){
    }).catch(()=>{});
   }
   setAuthToken("");setContributorId("");setLeaveSecret("");
-  setSessionTitle("");joinedRef.current=false;
+  setSessionTitle("");
   setNotice("You have left the camera meeting.");
  }
 
