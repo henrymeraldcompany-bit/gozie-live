@@ -11,7 +11,6 @@ export default function Viewer({code}:{code:string}){
  const [data,setData]=useState<PublicSession|null>(null);
  const [error,setError]=useState("");
  const [busy,setBusy]=useState(true);
- const [presenceId,setPresenceId]=useState("");
 
  useEffect(()=>{
   let active=true;
@@ -21,7 +20,6 @@ export default function Viewer({code}:{code:string}){
    try{
     const joined=await apiRequest<Join>("/v1/join/viewer",{method:"POST",body:JSON.stringify({code})});
     if(!active)return;
-    setPresenceId(joined.presenceId);
     const state=await apiRequest<PublicSession>("/v1/public/session?code="+encodeURIComponent(code));
     if(active)setData(state);
     timer=window.setInterval(()=>{
