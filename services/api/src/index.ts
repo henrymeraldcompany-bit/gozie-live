@@ -47,7 +47,8 @@ async function realtimeKit(env:Env,path:string,method="POST",payload?:unknown){
  const response=await fetch(endpoint,{method,headers:{authorization:"Bearer "+env.REALTIMEKIT_API_TOKEN,"content-type":"application/json"},body:payload===undefined?undefined:JSON.stringify(payload)});
  const raw=await response.text();let data:any={};try{data=raw?JSON.parse(raw):{};}catch{data={error:raw};}
  if(!response.ok||data.success===false)throw new Error("Cloudflare RealtimeKit API error ("+response.status+"): "+String(data.errors?.[0]?.message||data.error||raw).slice(0,400));
- return data.data??data;
+ const payload=data.data??data.result??data;
+ return payload.data??payload;
 }
 async function ensureMeeting(env:Env,session:Session):Promise<string>{
  if(session.realtimekit_meeting_id)return session.realtimekit_meeting_id;
