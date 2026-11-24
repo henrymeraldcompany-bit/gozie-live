@@ -16,6 +16,9 @@ interface Env {
   LIVEKIT_API_SECRET: string;
   APP_ORIGIN: string;
   ENGINE_SHARED_SECRET: string;
+  R2_ACCESS_KEY_ID: string;
+  R2_SECRET_ACCESS_KEY: string;
+  R2_S3_ENDPOINT: string;
   MEDIA_BUCKET: R2Bucket;
 }
 interface AuthUser { id: string; email?: string; user_metadata?: Record<string, unknown>; }
@@ -110,6 +113,164 @@ async function liveKitToken(env: Env, input: {
   const key = await crypto.subtle.importKey("raw", encoder.encode(env.LIVEKIT_API_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(unsigned)));
   return unsigned + "." + b64url(signature);
+}
+async function liveKitServiceToken(env: Env, grant: Record<string, unknown>): Promise<string> {
+  if (!env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET) throw new Error("LiveKit API credentials are not configured.");
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const header = encodeText(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const payload = encodeText(JSON.stringify({
+    iss: env.LIVEKIT_API_KEY, sub: "gozie-live-control", name: "GOZIE LIVE Control Service",
+    nbf: issuedAt - 5, iat: issuedAt, exp: issuedAt + 300, video: grant
+  }));
+  const unsigned = header + "." + payload;
+  const key = await crypto.subtle.importKey("raw", encoder.encode(env.LIVEKIT_API_SECRET), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return unsigned + "." + b64url(new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(unsigned))));
+}
+async function liveKitRpc<T>(env: Env, service: string, method: string, grant: Record<string, unknown>, body: unknown): Promise<T> {
+  if (!env.LIVEKIT_URL) throw new Error("LIVEKIT_URL is not configured.");
+  const host = env.LIVEKIT_URL.replace(/^wss:/i, "https:").replace(/^ws:/i, "http:").replace(/\/+$/, "");
+  const token = await liveKitServiceToken(env, grant);
+  const response = await fetch(host + "/twirp/livekit." + service + "/" + method, {
+    method: "POST",
+    headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  const payload = await response.text();
+  if (!response.ok) throw new Error("LiveKit " + service + "/" + method + " failed (" + response.status + "): " + payload.slice(0, 400));
+  return (payload ? JSON.parse(payload) : {}) as T;
+}
+interface EngineRunRow {
+  id: string; session_id: string; control_code_hash: string; ingress_id: string | null; egress_id: string | null;
+  recording_object_key: string | null; selected_source_identity: string | null; selected_asset_id: string | null;
+  status: string; started_at: string; ended_at: string | null;
+}
+async function ensureLiveKitRoom(env: Env, roomName: string): Promise<void> {
+  const listed = await liveKitRpc<{ rooms?: Array<{ name: string }> }>(env, "RoomService", "ListRooms", { roomList: true }, { names: [roomName] });
+  if (listed.rooms?.some((room) => room.name === roomName)) return;
+  await liveKitRpc(env, "RoomService", "CreateRoom", { roomCreate: true }, {
+    name: roomName, empty_timeout: 3600, departure_timeout: 20, max_participants: 250
+  });
+}
+async function startBroadcastEngine(env: Env, session: SessionRow): Promise<Record<string, unknown>> {
+  if (!env.LIVEKIT_URL || !env.LIVEKIT_API_KEY || !env.LIVEKIT_API_SECRET || !env.APP_ORIGIN) {
+    throw new Response("Broadcast startup needs LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, and APP_ORIGIN configured on the API Worker.", { status: 503 });
+  }
+  if (session.status === "ended") throw new Response("An ended session cannot be restarted.", { status: 409 });
+  const existing = await db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + session.id + "&select=*&limit=1");
+  if (existing[0]?.status === "running" || existing[0]?.status === "starting") {
+    return { session, mediaEngine: existing[0].status, broadcastOutput: "startup-requested", recordingEnabled: Boolean(existing[0].recording_object_key), alreadyRunning: true };
+  }
+  const controlCode = randomCode();
+  const inserted = await db<EngineRunRow[]>(env, "production_engine_runs", {
+    method: "POST", headers: { prefer: "return=representation" },
+    body: JSON.stringify({ session_id: session.id, control_code_hash: await sha256(controlCode), status: "starting" })
+  });
+  const run = inserted[0];
+  let ingressId = "";
+  try {
+    const inputRoom = sessionRoom(session.id, "contributors");
+    const programRoom = sessionRoom(session.id, "program");
+    await ensureLiveKitRoom(env, inputRoom);
+    const ingress = await liveKitRpc<{ ingress_id: string; url: string; stream_key: string }>(
+      env, "Ingress", "CreateIngress", { ingressAdmin: true }, {
+        input_type: 0,
+        name: "GOZIE LIVE Programme " + session.id,
+        room_name: programRoom,
+        participant_identity: "gozie-programme-" + session.id,
+        participant_name: "GOZIE LIVE Programme",
+        enable_transcoding: true
+      }
+    );
+    ingressId = ingress.ingress_id;
+    if (!ingress.url || !ingress.stream_key) throw new Error("LiveKit returned an incomplete RTMP ingress configuration.");
+    const templateUrl = new URL("/", env.APP_ORIGIN);
+    templateUrl.searchParams.set("mode", "engine");
+    templateUrl.searchParams.set("sessionId", session.id);
+    templateUrl.searchParams.set("controlCode", controlCode);
+    const outputs: Array<Record<string, unknown>> = [{
+      stream: { protocol: "RTMP", urls: [ingress.url.replace(/\/$/, "") + "/" + ingress.stream_key] }
+    }];
+    const recordingEnabled = Boolean(env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_S3_ENDPOINT);
+    let recordingObjectKey: string | null = null;
+    if (recordingEnabled) {
+      recordingObjectKey = "sessions/" + session.id + "/recordings/gozie-live-" + Date.now() + ".mp4";
+      outputs.push({
+        file: {
+          filepath: recordingObjectKey,
+          s3: {
+            access_key: env.R2_ACCESS_KEY_ID, secret: env.R2_SECRET_ACCESS_KEY,
+            bucket: "gozie-live-media", endpoint: env.R2_S3_ENDPOINT,
+            region: "auto", force_path_style: true, content_disposition: "attachment"
+          }
+        }
+      });
+    }
+    const egress = await liveKitRpc<{ egress_id: string; status: string }>(
+      env, "Egress", "StartEgress", { roomRecord: true }, {
+        room_name: inputRoom,
+        template: { layout: "gozie-live", custom_base_url: templateUrl.toString() },
+        preset: "H264_720P_30",
+        outputs
+      }
+    );
+    await db(env, "production_engine_runs?id=eq." + run.id, {
+      method: "PATCH", headers: { prefer: "return=minimal" },
+      body: JSON.stringify({ ingress_id: ingressId, egress_id: egress.egress_id, recording_object_key: recordingObjectKey, status: "running", last_error: null })
+    });
+    const updated = await db<SessionRow[]>(env, "broadcast_sessions?id=eq." + session.id, {
+      method: "PATCH", headers: { prefer: "return=representation" },
+      body: JSON.stringify({ status: "live", live_started_at: nowIso() })
+    });
+    return {
+      session: updated[0], mediaEngine: "running", broadcastOutput: "startup-requested",
+      egressStatus: egress.status, recordingEnabled,
+      recordingNotice: recordingEnabled ? "Programme recording is configured to save to private R2 storage." : "Live output is configured, but R2 S3 credentials are missing so recording is not enabled.",
+      message: "LiveKit composition and programme-room publishing have been requested. Confirm that the programme appears in the viewer before treating the broadcast as live."
+    };
+  } catch (error) {
+    if (ingressId) {
+      try { await liveKitRpc(env, "Ingress", "DeleteIngress", { ingressAdmin: true }, { ingress_id: ingressId }); } catch { /* best-effort cleanup */ }
+    }
+    await db(env, "production_engine_runs?id=eq." + run.id, {
+      method: "PATCH", headers: { prefer: "return=minimal" },
+      body: JSON.stringify({ status: "failed", last_error: error instanceof Error ? error.message.slice(0, 500) : "Engine startup failed." })
+    });
+    throw error;
+  }
+}
+async function stopBroadcastEngine(env: Env, session: SessionRow, endedAt: string): Promise<{ recordingId: string | null; recordingAvailable: boolean }> {
+  const runs = await db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + session.id + "&select=*&limit=1");
+  const run = runs[0];
+  if (!run) return { recordingId: null, recordingAvailable: false };
+  if (run.egress_id) {
+    await db(env, "production_engine_runs?id=eq." + run.id, {
+      method: "PATCH", headers: { prefer: "return=minimal" }, body: JSON.stringify({ status: "stopping" })
+    });
+    await liveKitRpc(env, "Egress", "StopEgress", { roomRecord: true }, { egress_id: run.egress_id });
+  }
+  if (run.ingress_id) {
+    try { await liveKitRpc(env, "Ingress", "DeleteIngress", { ingressAdmin: true }, { ingress_id: run.ingress_id }); } catch { /* already removed by LiveKit */ }
+  }
+  let recordingId: string | null = null;
+  let recordingAvailable = false;
+  if (run.recording_object_key) {
+    const stored = await env.MEDIA_BUCKET.get(run.recording_object_key);
+    if (stored?.body) {
+      await stored.body.cancel();
+      const expiresAt = new Date(new Date(endedAt).getTime() + 7 * 86400000).toISOString();
+      const rows = await db<Array<{ id: string }>>(env, "recordings", {
+        method: "POST", headers: { prefer: "return=representation" },
+        body: JSON.stringify({ session_id: session.id, object_key: run.recording_object_key, expires_at: expiresAt })
+      });
+      recordingId = rows[0]?.id ?? null;
+      recordingAvailable = Boolean(recordingId);
+    }
+  }
+  await db(env, "production_engine_runs?id=eq." + run.id, {
+    method: "PATCH", headers: { prefer: "return=minimal" },
+    body: JSON.stringify({ status: "ended", ended_at: endedAt })
+  });
+  return { recordingId, recordingAvailable };
 }
 async function jsonBody<T>(request: Request): Promise<T> {
   try { return await request.json() as T; } catch { throw new Response("A valid JSON request body is required.", { status: 400 }); }
@@ -209,13 +370,14 @@ async function handle(request: Request, env: Env): Promise<Response> {
     const action = sessionMatch[2] ?? "";
     const { user, session } = await requireOwner(request, env, id);
     if (!action && request.method === "GET") {
-      const [contributors, assets, recordings, viewers] = await Promise.all([
+      const [contributors, assets, recordings, viewers, engineRuns] = await Promise.all([
         db<ContributorRow[]>(env, "contributors?session_id=eq." + id + "&status=neq.removed&select=id,display_name,status,audio_muted,provider_identity,created_at&order=created_at.asc"),
         db<AssetRow[]>(env, "media_assets?session_id=eq." + id + "&select=id,asset_kind,content_type,file_name,created_at&order=created_at.desc"),
         db<Array<{ id: string; created_at: string; expires_at: string; deleted_at: string | null; size_bytes: number | null }>>(env, "recordings?session_id=eq." + id + "&select=id,created_at,expires_at,deleted_at,size_bytes&order=created_at.desc"),
-        db<Array<{ id: string }>>(env, "viewer_presence?session_id=eq." + id + "&expires_at=gt." + encodeURIComponent(nowIso()) + "&select=id")
+        db<Array<{ id: string }>>(env, "viewer_presence?session_id=eq." + id + "&expires_at=gt." + encodeURIComponent(nowIso()) + "&select=id"),
+        db<EngineRunRow[]>(env, "production_engine_runs?session_id=eq." + id + "&select=status,egress_id,recording_object_key,started_at,ended_at,last_error&limit=1")
       ]);
-      return json({ session, contributors, assets, recordings, viewerCount: viewers.length, mediaEngine: "not-connected" });
+      return json({ session, contributors, assets, recordings, viewerCount: viewers.length, mediaEngine: engineRuns[0]?.status ?? "not-started", engine: engineRuns[0] ?? null });
     }
     if (action === "share-links" && request.method === "POST") {
       const contributorCode = randomCode();
@@ -231,20 +393,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
     }
     if (action === "owner-tokens" && request.method === "POST") return json(await issueOwnerTokens(env, user, session));
     if (action === "start" && request.method === "POST") {
-      if (session.status === "ended") return fail("An ended session cannot be restarted.", 409);
-      const updated = await db<SessionRow[]>(env, "broadcast_sessions?id=eq." + id, {
-        method: "PATCH", headers: { prefer: "return=representation" },
-        body: JSON.stringify({ status: "live", live_started_at: nowIso() })
-      });
-      return json({ session: updated[0], mediaEngine: "not-connected", broadcastOutput: "offline-until-engine-deployed" });
+      const result = await startBroadcastEngine(env, session);
+      return json(result, 202);
     }
     if (action === "end" && request.method === "POST") {
       const endedAt = nowIso();
+      const stopped = await stopBroadcastEngine(env, session, endedAt);
       const updated = await db<SessionRow[]>(env, "broadcast_sessions?id=eq." + id, {
         method: "PATCH", headers: { prefer: "return=representation" },
         body: JSON.stringify({ status: "ended", ended_at: endedAt })
       });
-      return json({ session: updated[0], recordingRetentionUntil: new Date(Date.now() + 7 * 86400000).toISOString(), mediaEngine: "not-connected" });
+      return json({
+        session: updated[0], recordingId: stopped.recordingId, recordingAvailable: stopped.recordingAvailable,
+        recordingRetentionUntil: new Date(new Date(endedAt).getTime() + 7 * 86400000).toISOString(),
+        mediaEngine: "ended"
+      });
     }
     if (action === "production" && request.method === "POST") {
       const body = await jsonBody<{ command?: string; payload?: Record<string, unknown> }>(request);
