@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Radio, Camera, Eye, LayoutDashboard } from "lucide-react";
 import AdminStudio from "./components/AdminStudio";
 import AuthPanel from "./components/AuthPanel";
 import CameraStudio from "./components/CameraStudio";
