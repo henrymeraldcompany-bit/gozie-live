@@ -558,7 +558,7 @@ async function handle(request: Request, env: Env): Promise<Response> {
       selectedSourceIdentity: run.selected_source_identity, asset, contributors
     });
   }
-  const engineAsset = path.match(/^\\/v1\\/public\\/engine\\/assets\\/([0-9a-f-]+)$/i);
+  const engineAsset = path.match(/^\/v1\/public\/engine\/assets\/([0-9a-f-]+)$/i);
   if (engineAsset && request.method === "GET") {
     const sessionId = url.searchParams.get("sessionId") ?? "";
     const controlCode = url.searchParams.get("controlCode") ?? "";
