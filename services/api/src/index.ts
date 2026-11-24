@@ -200,30 +200,34 @@ async function startBroadcastEngine(env: Env, session: SessionRow): Promise<Reco
     templateUrl.searchParams.set("mode", "engine");
     templateUrl.searchParams.set("sessionId", session.id);
     templateUrl.searchParams.set("controlCode", controlCode);
-    const outputs: Array<Record<string, unknown>> = [{
-      stream: { protocol: "RTMP", urls: [ingress.url.replace(/\/$/, "") + "/" + ingress.stream_key] }
+    const streamOutputs = [{
+      protocol: "rtmp",
+      urls: [ingress.url.replace(/\/$/, "") + "/" + ingress.stream_key]
     }];
+    const fileOutputs: Array<Record<string, unknown>> = [];
     const recordingEnabled = Boolean(env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY && env.R2_S3_ENDPOINT);
     let recordingObjectKey: string | null = null;
     if (recordingEnabled) {
       recordingObjectKey = "sessions/" + session.id + "/recordings/gozie-live-" + Date.now() + ".mp4";
-      outputs.push({
-        file: {
-          filepath: recordingObjectKey,
-          s3: {
-            access_key: env.R2_ACCESS_KEY_ID, secret: env.R2_SECRET_ACCESS_KEY,
-            bucket: "gozie-live-media", endpoint: env.R2_S3_ENDPOINT,
-            region: "auto", force_path_style: true, content_disposition: "attachment"
-          }
+      fileOutputs.push({
+        filepath: recordingObjectKey,
+        s3: {
+          access_key: env.R2_ACCESS_KEY_ID, secret: env.R2_SECRET_ACCESS_KEY,
+          bucket: "gozie-live-media", endpoint: env.R2_S3_ENDPOINT,
+          region: "auto", force_path_style: true, content_disposition: "attachment"
         }
       });
     }
     const egress = await liveKitRpc<{ egress_id: string; status: string }>(
-      env, "Egress", "StartEgress", { roomRecord: true }, {
+      env, "Egress", "StartRoomCompositeEgress", {
+        roomRecord: true
+      }, {
         room_name: inputRoom,
-        template: { layout: "gozie-live", custom_base_url: templateUrl.toString() },
+        layout: "gozie-live",
+        custom_base_url: templateUrl.toString(),
         preset: "H264_720P_30",
-        outputs
+        stream_outputs: streamOutputs,
+        file_outputs: fileOutputs
       }
     );
     await db(env, "production_engine_runs?id=eq." + run.id, {
