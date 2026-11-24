@@ -1,41 +1,41 @@
 # GOZIE LIVE
 
-GOZIE LIVE is a multi-camera live-streaming and broadcast-production application. Its target production stack is **Cloudflare-only**.
+GOZIE LIVE is a multi-camera streaming and broadcast-production application built on Cloudflare.
 
-## Website
+## Application website
 
-Current GitHub Pages preview: https://henrymeraldcompany-bit.github.io/gozie-live/
+**Production target:** https://gozie-live.gozielive.workers.dev/gozie-live/
 
-The frontend source is in `apps/web`. The deployment workflow currently publishes a preview to GitHub Pages. The intended production hosting is Cloudflare Workers + Workers Static Assets.
+The repository root on GitHub is the source-code/README page. Open the application URL above to use the website.
 
-## Cloudflare architecture
+## Cloudflare infrastructure
 
-- Workers: application API and web hosting.
-- D1: user accounts, sessions, contributor presence, commands and recording metadata.
-- Durable Objects: per-session coordination and admission control.
-- Realtime SFU + TURN: WebRTC camera publishing and media routing.
-- R2: private media assets and programme recordings.
-- Workflows / Queues / Cron: durable orchestration and seven-day cleanup.
-- Containers: independent server-side compositor for the final programme, subject to account/resource validation.
-- Stream: public delivery of the composed programme where the chosen output path supports it.
+- Workers + Static Assets — frontend and API
+- D1 — application database
+- Durable Objects — per-session coordination and camera admission
+- Realtime SFU — WebRTC camera publishing and preview subscriptions
+- R2 — private media uploads and recordings
+- Cron Trigger — cleanup jobs
+- Containers — planned independent programme compositor
 
-No Supabase or LiveKit dependency is part of the target architecture. The existing API/frontend still contain legacy integration code that must be removed before the Cloudflare-only backend is deployable.
+There is no Supabase or LiveKit dependency in the target architecture.
 
-## Provisioned Cloudflare resources
+## Provisioned resources
 
-- Private R2 bucket: `gozie-live-media`.
-- APAC D1 database: `gozie-live-db`.
-- D1 schema: `database/cloudflare-d1/0001_initial.sql` (applied).
+- D1 database: `gozie-live-db`
+- R2 bucket: `gozie-live-media`
+- Realtime SFU app: `GOZIE LIVE production media`
+- Workers subdomain: `gozielive.workers.dev`
 
-## Current limitations
+## Current implementation status
 
-The website is deployed as a preview, but this does not mean live broadcasting is operational. D1 binding and application migration, Cloudflare Realtime SFU setup, Durable Objects, R2 integration, the independent compositor, and end-to-end media testing remain.
+The application includes host authentication endpoints, session management, share links, contributor admission, Cloudflare WebRTC publishing/preview negotiation and private media uploads. Email verification requires a configured Cloudflare Email Sending domain. The independent compositor and final audience programme output are not yet deployed, so the app must not be represented as a fully working broadcast service yet.
 
-Read [the Cloudflare-only deployment plan](docs/deployment/plan.md).
+See [the deployment plan](docs/deployment/plan.md).
 
 ## Local development
 
-Requirements: Node.js 22.22+ and npm.
+Node.js 22.22+ and npm are required.
 
 ```bash
 npm install
