@@ -1,57 +1,68 @@
-# GOZIE LIVE Cloudflare deployment
+# GOZIE LIVE — Cloudflare-only deployment status
 
-## Cloudflare-only production stack
+## Production URL
 
-- **Workers + Workers Static Assets:** one origin for the SPA and API.
-- **D1:** host accounts, sessions, contributor records, presence and recording metadata.
-- **Durable Objects:** per-session camera slot admission and liveness.
-- **Realtime SFU:** browser camera and microphone publishing plus host preview subscriptions.
-- **R2:** private assets and programme recordings.
-- **Cron Trigger:** hourly recording expiration and session cleanup.
-- **Containers:** planned independent programme compositor for final video/audio mixing; not yet deployed.
-- **Stream:** candidate delivery path for a final programme after the compositor is ready.
+**Application:** https://gozie-live.gozielive.workers.dev/gozie-live/
 
-## Provisioned resources
+The GitHub repository home page shows the README and source files by design. It is not the application. Open the Cloudflare Worker URL above to access the app interface.
 
-- Account: dedicated Live Stream Cloudflare account.
+## Provisioned Cloudflare resources
+
+- Dedicated account: **Live Stream**.
 - Workers subdomain: `gozielive.workers.dev`.
-- D1: `gozie-live-db`, APAC, ID `67f8680e-5c19-4cc6-b082-65d12dc7846a`.
-- R2: private bucket `gozie-live-media`.
-- Realtime SFU app: `GOZIE LIVE production media`, ID `a15d31f644b96a0376362c254686ea40`.
+- Worker: `gozie-live`.
+- Worker deployment ID: `44431b68e6af4bf089a609e504460553`.
+- Worker subdomain access: enabled.
+- D1 database: `gozie-live-db`, APAC, ID `67f8680e-5c19-4cc6-b082-65d12dc7846a`.
+- R2 bucket: `gozie-live-media`, private.
+- Durable Object: `SessionRoom`, SQLite-backed.
+- Realtime SFU application: `GOZIE LIVE production media`, app ID `a15d31f644b96a0376362c254686ea40`.
+- Hourly Cron Trigger: `0 * * * *`.
 
-## Implemented in repository
+## Cloudflare-only architecture
 
-- React Admin, Camera and Viewer interfaces.
-- Cloudflare D1-backed API routes for account registration, verification, login, sessions, contributor admission, uploads, shares and recordings metadata.
-- Password hashing using PBKDF2 and opaque, database-backed HttpOnly session cookies.
-- Per-session Durable Object admission limit of 200 contributors with presence expiry.
-- Cloudflare Realtime SFU WebRTC publishing and host subscription negotiation.
-- Private R2 uploads for image, video and audio assets.
-- Recording expiration scheduler based on the session end timestamp plus seven days.
+- **Workers:** serves the web application and same-origin API.
+- **D1:** host accounts, sessions, contributors, production commands and recording metadata.
+- **Durable Objects:** per-session contributor admission and presence.
+- **Realtime SFU:** WebRTC camera publishing and host preview subscriptions.
+- **R2:** private media uploads and recording storage.
+- **Cron:** removes stored recording objects after their seven-day expiry.
+- **RealtimeKit or Containers:** candidate server-side programme production and streaming. Not deployed yet.
 
-## Remaining production gaps
+No Supabase or LiveKit integration is part of the application stack.
 
-- Worker deployment and secret bindings must be completed and health checked.
-- Email Sending domain is not configured in the account; registration/verification deliberately reports this rather than creating unverified host accounts.
-- Cloudflare Realtime camera publishing and host preview must be tested on physical phones.
-- A dedicated Cloudflare Container compositor is not yet deployed. The current API marks the camera ingest path separately and does not claim a final programme stream.
-- Final programme encoding, switching, audio mix/limiting, Stream delivery and MP4 recording still need implementation and end-to-end validation.
-- 200 contributors is a configured ceiling, not a demonstrated performance result. Load tests are required.
+## Implemented and deployed
 
-## URLs
+- React Admin, Camera and Viewer interfaces are bundled inside the Worker.
+- D1-backed API routes for host registration, verification, login, session management and share links.
+- PBKDF2 password hashing and opaque HttpOnly database-backed session cookies.
+- Durable Object admission code with a maximum of 200 active contributor slots and stale-presence expiry.
+- Cloudflare Realtime SFU WebRTC publish and host-preview negotiation code.
+- Private R2 image/video/audio upload and authenticated asset retrieval.
+- Hourly expired-recording cleanup job.
+- Health endpoint reports D1, R2, Realtime SFU secret and email configuration status.
 
-Production target: `https://gozie-live.gozielive.workers.dev/gozie-live/`.
+CI passed on the build that was deployed. The Worker has been accepted by Cloudflare and its `workers.dev` route is enabled. The public page and real media paths still require independent browser/device verification.
 
-The repository root on GitHub is documentation and source code, not the application website.
+## Required secure configuration still outstanding
 
-## Secrets
+1. **Worker secret `REALTIME_SFU_APP_SECRET`:** must be installed through Cloudflare Worker Settings → Variables and Secrets. The value must never be placed in GitHub or the frontend.
+2. **Worker secret `AUTH_SIGNING_SECRET`:** generate a unique high-entropy value and store it as a Worker secret.
+3. **Email Sending:** this account currently has no DNS zone or verified sending domain. Add a domain to Cloudflare DNS, onboard it in Cloudflare Email Service, then bind the `EMAIL` sending integration and configure `EMAIL_FROM`. Until then, registration deliberately refuses to create an account that cannot be verified.
+4. After setting the secrets, redeploy or restart the Worker if required by the dashboard, then test registration and camera publishing.
 
-Keep `REALTIME_SFU_APP_SECRET` and `AUTH_SIGNING_SECRET` as Worker secrets. Never expose them in source code, Pages variables, frontend bundles or QR links. The SFU app ID is not secret.
+## Programme production not yet deployed
 
-## Retention
+The current system does not yet switch camera sources into a final broadcast, mix all source audio, deliver a final programme to viewers, or produce a final-programme MP4 recording. The host dashboard labels the programme engine as unavailable. The next engineering milestone is a verified Cloudflare RealtimeKit composite/RTMP path or a Cloudflare Container compositor.
 
-Recording expiry is 7 days after session end, not seven days after upload. The scheduled Worker deletes expired R2 objects and records the deletion timestamp.
+The SFU's WebSocket video adapter is snapshot-oriented and cannot be treated as a normal continuous 30 fps video feed. The programme engine must use a supported continuous media path.
+
+## Capacity and retention
+
+The configured 200-contributor limit is an admission ceiling, not a performance guarantee. Load testing must progress through 1, 5, 20, 50, 100, 150 and 200 camera contributors, then independently test viewers.
+
+When recording is implemented, expiry must be calculated from session end plus seven days. The hourly cleanup job is configured, but there are no production recordings until the final-output recorder exists.
 
 ## Cost
 
-Cloudflare-only does not mean free or unlimited. Realtime media egress, Workers, D1, R2 operations/storage, Containers and Stream delivery can incur usage charges. Check current account pricing before opening a large public session.
+Cloudflare-only does not mean free or unlimited. Realtime egress, RealtimeKit exports (if selected), Workers, D1, R2 storage/operations, and any Containers/Stream delivery may incur usage charges. Do not start a high-volume public broadcast until pricing and account limits are checked.
