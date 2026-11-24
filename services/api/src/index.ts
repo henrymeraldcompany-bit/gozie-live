@@ -72,7 +72,7 @@ async function ensureHostParticipant(env:Env,session:Session,user:User){
  await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_host_participant_id=? WHERE id=?").bind(participant.id,session.id).run();
  return {meetingId,participantId:participant.id,authToken:participant.token};
 }
-async function byCode(env:Env,code:string,type:"viewer"|"contributor"){if(!code||code.length>160)throw new Response("Invalid share link.",{status:400});const col=type==="viewer"?"viewer_code_hash":"contributor_code_hash";const s=await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE "+col+"=?").bind(await hash(code)).first<Session>();if(!s||s.status==="ended")throw new Response("Share link invalid or expired.",{status:404});return s;}
+async function byCode(env:Env,code:string,type:"viewer"|"contributor"){if(!code||code.length>160)throw new Response("Invalid share link.",{status:400});const col=type==="viewer"?"viewer_code_hash":"contributor_code_hash";const s=await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE "+col+"=?").bind(await hash(code)).first<Session>();if(!s||(s.status==="ended"&&type==="contributor"))throw new Response("Share link invalid or expired.",{status:404});return s;}
 function room(env:Env,id:string){return env.SESSION_ROOMS.get(env.SESSION_ROOMS.idFromName(id));}
 async function roomPost(env:Env,sid:string,action:string,data:unknown){return room(env,sid).fetch(new Request("https://session/"+action,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(data)}));}
 async function handle(req:Request,env:Env):Promise<Response>{
@@ -114,13 +114,6 @@ async function handle(req:Request,env:Env):Promise<Response>{
   const u=await auth(req,env),x=await input<{title?:string;scheduledAt?:string|null}>(req),title=(x.title||"").trim();if(!title||title.length>120)return fail("Session title must be 1–120 characters.");
   const sid=uuid(),contributorCode=random(),viewerCode=random();await env.DB.prepare("INSERT INTO broadcast_sessions(id,owner_id,title,status,scheduled_at,contributor_code_hash,viewer_code_hash,public_id) VALUES(?,?,?,'scheduled',?,?,?,?)").bind(sid,u.id,title,x.scheduledAt||null,await hash(contributorCode),await hash(viewerCode),random(12)).run();
   return json({session:{id:sid,title,status:"scheduled",scheduled_at:x.scheduledAt||null},contributorUrl:appUrl(env,{mode:"camera",code:contributorCode}),viewerUrl:appUrl(env,{mode:"viewer",code:viewerCode})},201);
- }
- if(path==="/v1/join/contributor"&&method==="POST"){
-  const x=await input<{code?:string;displayName?:string}>(req),s=await byCode(env,x.code||"","contributor"),name=(x.displayName||"").trim();if(!name||name.length>80)return fail("Enter a display name up to 80 characters.");
-  const contributorId=uuid(),leaveSecret=random(),leaveHash=await hash(leaveSecret),admit=await roomPost(env,s.id,"admit",{contributorId,displayName:name,leaveSecretHash:leaveHash,maximum:200});
-  if(!admit.ok)return fail("This session has reached its 200-camera limit.",429);
-  await env.DB.prepare("INSERT INTO contributors(id,session_id,display_name,status,last_seen_at,leave_secret_hash) VALUES(?,?,?,'connected',?,?)").bind(contributorId,s.id,name,now(),leaveHash).run();
-  return json({session:{id:s.id,title:s.title},contributor:{id:contributorId,display_name:name},leaveSecret},201);
  }
  if(path==="/v1/join/contributor"&&method==="POST"){
   const x=await input<{code?:string;displayName?:string}>(req),s=await byCode(env,x.code||"","contributor"),name=(x.displayName||"").trim();
@@ -225,7 +218,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
   }
   if(action==="recording/stop"&&method==="POST"){
    if(!session.realtimekit_recording_id)return fail("There is no recording to stop.",404);
-   await realtimeKit(env,"/recordings/"+encodeURIComponent(session.realtimekit_recording_id),"PUT",{action:"stop"});
+   await realtimeKit(env,"/recordings/"+encodeURIComponent(session.realtimekit_recording_id),"PUT",{action:"stop"}).catch(()=>undefined);
    const details=await realtimeKit(env,"/recordings/"+encodeURIComponent(session.realtimekit_recording_id),"GET");
    const expiry=session.ended_at?new Date(new Date(session.ended_at).getTime()+7*86400000).toISOString():"2099-12-31T23:59:59.999Z";
    await env.DB.prepare("UPDATE recordings SET download_url=?,status=?,expires_at=?,size_bytes=? WHERE provider_recording_id=? AND session_id=?")
@@ -255,7 +248,7 @@ async function handle(req:Request,env:Env):Promise<Response>{
    if(x.command==="mute-contributor"&&typeof x.payload?.contributorId==="string"&&typeof x.payload?.muted==="boolean"){
     const contributor=await env.DB.prepare("SELECT realtimekit_participant_id FROM contributors WHERE id=? AND session_id=?").bind(x.payload.contributorId,session.id).first<{realtimekit_participant_id:string|null}>();
     if(!contributor?.realtimekit_participant_id)return fail("Camera participant not found or not connected.",404);
-    if(x.payload.muted&&session.realtimekit_meeting_id)await realtimeKit(env,"/meetings/"+encodeURIComponent(session.realtimekit_meeting_id)+"/active-session/mute","POST",{custom_participant_ids:[contributor.realtimekit_participant_id]});
+    if(x.payload.muted&&session.realtimekit_meeting_id)await realtimeKit(env,"/meetings/"+encodeURIComponent(session.realtimekit_meeting_id)+"/active-session/mute","POST",{participant_ids:[contributor.realtimekit_participant_id]});
     await env.DB.prepare("UPDATE contributors SET audio_muted=? WHERE id=? AND session_id=?").bind(x.payload.muted?1:0,x.payload.contributorId,session.id).run();
     return json({accepted:true,applied:Boolean(x.payload.muted),message:x.payload.muted?"Participant microphone muted by the host.":"Use the host meeting controls to unmute this participant."},202);
    }
