@@ -48,16 +48,55 @@ async function auth(req, env) { const raw = cookie(req); if (!raw)
     throw new Response("Verify your email before signing in.", { status: 403 }); return row; }
 async function owner(req, env, id) { const user = await auth(req, env); const session = await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE id=? AND owner_id=?").bind(id, user.id).first(); if (!session)
     throw new Response("Session not found.", { status: 404 }); return { user, session }; }
-async function sfu(env, path, method = "POST", data) { if (!env.REALTIME_SFU_APP_ID || !env.REALTIME_SFU_APP_SECRET)
-    throw new Response("Cloudflare Realtime SFU is not configured.", { status: 503 }); const r = await fetch("https://rtc.live.cloudflare.com/v1/apps/" + env.REALTIME_SFU_APP_ID + path, { method, headers: { authorization: "Bearer " + env.REALTIME_SFU_APP_SECRET, "content-type": "application/json" }, body: data === undefined ? undefined : JSON.stringify(data) }); const t = await r.text(); let d = {}; try {
-    d = t ? JSON.parse(t) : {};
+async function realtimeKit(env, path, method = "POST", payload) {
+    if (!env.REALTIMEKIT_API_TOKEN || !env.REALTIMEKIT_ACCOUNT_ID || !env.REALTIMEKIT_APP_ID) {
+        throw new Response("Cloudflare RealtimeKit is not configured. Add the Realtime Admin API token as the REALTIMEKIT_API_TOKEN Worker secret.", { status: 503 });
+    }
+    const endpoint = "https://api.cloudflare.com/client/v4/accounts/" + env.REALTIMEKIT_ACCOUNT_ID + "/realtime/kit/" + env.REALTIMEKIT_APP_ID + path;
+    const response = await fetch(endpoint, { method, headers: { authorization: "Bearer " + env.REALTIMEKIT_API_TOKEN, "content-type": "application/json" }, body: payload === undefined ? undefined : JSON.stringify(payload) });
+    const raw = await response.text();
+    let data = {};
+    try {
+        data = raw ? JSON.parse(raw) : {};
+    }
+    catch {
+        data = { error: raw };
+    }
+    if (!response.ok || data.success === false)
+        throw new Error("Cloudflare RealtimeKit API error (" + response.status + "): " + String(data.errors?.[0]?.message || data.error || raw).slice(0, 400));
+    const responseData = data.data ?? data.result ?? data;
+    return responseData.data ?? responseData;
 }
-catch {
-    d = { error: t };
-} if (!r.ok)
-    throw new Error("Realtime SFU error " + r.status + ": " + String(d.error || t).slice(0, 350)); return d; }
+async function ensureMeeting(env, session) {
+    if (session.realtimekit_meeting_id)
+        return session.realtimekit_meeting_id;
+    const created = await realtimeKit(env, "/meetings", "POST", { title: session.title, session_keep_alive_time_in_secs: 600, live_stream_on_start: false, record_on_start: false });
+    if (!created.id)
+        throw new Error("RealtimeKit did not return a meeting ID.");
+    await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_meeting_id=? WHERE id=?").bind(created.id, session.id).run();
+    session.realtimekit_meeting_id = created.id;
+    return created.id;
+}
+async function addRealtimeKitParticipant(env, meetingId, identity, name, preset) {
+    return await realtimeKit(env, "/meetings/" + encodeURIComponent(meetingId) + "/participants", "POST", { name, preset_name: preset, custom_participant_id: identity });
+}
+async function ensureHostParticipant(env, session, user) {
+    const meetingId = session.realtimekit_meeting_id;
+    if (!meetingId)
+        throw new Response("Start the session before opening the host studio.", { status: 409 });
+    if (session.realtimekit_host_participant_id) {
+        const refreshed = await realtimeKit(env, "/meetings/" + encodeURIComponent(meetingId) + "/participants/" + encodeURIComponent(session.realtimekit_host_participant_id) + "/token", "POST", {});
+        if (refreshed.token)
+            return { meetingId, participantId: session.realtimekit_host_participant_id, authToken: refreshed.token };
+    }
+    const participant = await addRealtimeKitParticipant(env, meetingId, "host-" + user.id, user.display_name || "GOZIE LIVE Host", "gozie_host");
+    if (!participant.id || !participant.token)
+        throw new Error("RealtimeKit did not return host participant credentials.");
+    await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_host_participant_id=? WHERE id=?").bind(participant.id, session.id).run();
+    return { meetingId, participantId: participant.id, authToken: participant.token };
+}
 async function byCode(env, code, type) { if (!code || code.length > 160)
-    throw new Response("Invalid share link.", { status: 400 }); const col = type === "viewer" ? "viewer_code_hash" : "contributor_code_hash"; const s = await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE " + col + "=?").bind(await hash(code)).first(); if (!s || s.status === "ended")
+    throw new Response("Invalid share link.", { status: 400 }); const col = type === "viewer" ? "viewer_code_hash" : "contributor_code_hash"; const s = await env.DB.prepare("SELECT * FROM broadcast_sessions WHERE " + col + "=?").bind(await hash(code)).first(); if (!s || (s.status === "ended" && type === "contributor"))
     throw new Response("Share link invalid or expired.", { status: 404 }); return s; }
 function room(env, id) { return env.SESSION_ROOMS.get(env.SESSION_ROOMS.idFromName(id)); }
 async function roomPost(env, sid, action, data) { return room(env, sid).fetch(new Request("https://session/" + action, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) })); }
@@ -77,7 +116,7 @@ async function handle(req, env) {
             service: "GOZIE LIVE",
             database,
             r2: env.MEDIA_BUCKET ? "configured" : "missing",
-            realtimeSfu: env.REALTIME_SFU_APP_SECRET ? "configured" : "needs-worker-secret",
+            realtimeKit: env.REALTIMEKIT_API_TOKEN ? "configured" : "needs-REALTIMEKIT_API_TOKEN-secret",
             emailVerification: "not-required-password-based-host-accounts",
             time: now()
         };
@@ -131,67 +170,62 @@ async function handle(req, env) {
         const x = await input(req), s = await byCode(env, x.code || "", "contributor"), name = (x.displayName || "").trim();
         if (!name || name.length > 80)
             return fail("Enter a display name up to 80 characters.");
-        const contributorId = uuid(), leaveSecret = random(), leaveHash = await hash(leaveSecret), admit = await roomPost(env, s.id, "admit", { contributorId, displayName: name, leaveSecretHash: leaveHash, maximum: 200 });
-        if (!admit.ok)
+        if (!s.realtimekit_meeting_id || s.status !== "live")
+            return fail("The host has not started this broadcast yet. Please try again when it is live.", 409);
+        const contributorId = uuid(), leaveSecret = random(), leaveHash = await hash(leaveSecret);
+        const admission = await roomPost(env, s.id, "admit", { contributorId, displayName: name, leaveSecretHash: leaveHash, maximum: 200 });
+        if (!admission.ok)
             return fail("This session has reached its 200-camera limit.", 429);
-        await env.DB.prepare("INSERT INTO contributors(id,session_id,display_name,status,last_seen_at,leave_secret_hash) VALUES(?,?,?,'connected',?,?)").bind(contributorId, s.id, name, now(), leaveHash).run();
-        return json({ session: { id: s.id, title: s.title }, contributor: { id: contributorId, display_name: name }, leaveSecret }, 201);
+        try {
+            const participant = await addRealtimeKitParticipant(env, s.realtimekit_meeting_id, contributorId, name, "gozie_camera");
+            if (!participant.id || !participant.token)
+                throw new Error("RealtimeKit did not return camera participant credentials.");
+            await env.DB.prepare("INSERT INTO contributors(id,session_id,display_name,status,last_seen_at,leave_secret_hash,realtimekit_participant_id) VALUES(?,?,?,'connected',?,?,?)").bind(contributorId, s.id, name, now(), leaveHash, participant.id).run();
+            return json({ session: { id: s.id, title: s.title }, contributor: { id: contributorId, display_name: name }, leaveSecret, authToken: participant.token, meetingId: s.realtimekit_meeting_id }, 201);
+        }
+        catch (error) {
+            await roomPost(env, s.id, "leave", { contributorId, leaveSecretHash: leaveHash }).catch(() => undefined);
+            throw error;
+        }
     }
-    if (path === "/v1/media/publish" && method === "POST") {
-        const x = await input(req), s = await byCode(env, x.code, "contributor");
-        const c = await env.DB.prepare("SELECT id,leave_secret_hash FROM contributors WHERE id=? AND session_id=?").bind(x.contributorId, s.id).first();
-        if (!c || !equal(c.leave_secret_hash, await hash(x.leaveSecret || "")))
-            return fail("Contributor access denied.", 403);
-        if (!x.sessionDescription?.sdp || !Array.isArray(x.tracks) || !x.tracks.length || x.tracks.length > 2)
-            return fail("Missing media offer or tracks.");
-        const created = await sfu(env, "/sessions/new"), sfuId = created.sessionId;
-        const result = await sfu(env, "/sessions/" + sfuId + "/tracks/new", "POST", { sessionDescription: x.sessionDescription, tracks: x.tracks.map(t => ({ location: "local", mid: t.mid, trackName: t.trackName })) });
-        await env.DB.prepare("UPDATE contributors SET publisher_session_id=?,status='publishing',last_seen_at=? WHERE id=?").bind(sfuId, now(), c.id).run();
-        await env.DB.batch(x.tracks.map(t => env.DB.prepare("INSERT OR REPLACE INTO contributor_publications(id,contributor_id,session_id,sfu_session_id,track_name,kind) VALUES(?,?,?,?,?,?)").bind(uuid(), c.id, s.id, sfuId, t.trackName, t.kind)));
-        await roomPost(env, s.id, "publish", { contributorId: c.id, publisherSessionId: sfuId });
-        return json({ sessionId: sfuId, sessionDescription: result.sessionDescription }, 201);
+    if (path === "/v1/join/viewer" && method === "POST") {
+        const x = await input(req), s = await byCode(env, x.code || "", "viewer"), presenceId = uuid(), identity = "viewer-" + uuid();
+        await env.DB.prepare("INSERT INTO viewer_presence(id,session_id,identity,created_at,last_seen_at,expires_at) VALUES(?,?,?, ?,?,?)").bind(presenceId, s.id, identity, now(), now(), new Date(Date.now() + 60000).toISOString()).run();
+        return json({ presenceId, session: { id: s.id, title: s.title, status: s.status }, playbackUrl: s.playback_url, programmeAvailable: Boolean(s.playback_url) });
+    }
+    if (path === "/v1/viewer/heartbeat" && method === "POST") {
+        const x = await input(req), s = await byCode(env, x.code || "", "viewer");
+        if (!x.presenceId)
+            return fail("Viewer presence ID is required.");
+        const updated = await env.DB.prepare("UPDATE viewer_presence SET last_seen_at=?,expires_at=? WHERE id=? AND session_id=?")
+            .bind(now(), new Date(Date.now() + 60000).toISOString(), x.presenceId, s.id).run();
+        return json({ ok: true });
     }
     if (path === "/v1/contributors/presence" && method === "POST") {
-        const x = await input(req), c = await env.DB.prepare("SELECT id,session_id,leave_secret_hash FROM contributors WHERE id=?").bind(x.contributorId).first();
+        const x = await input(req), c = await env.DB.prepare("SELECT id,session_id,leave_secret_hash,realtimekit_participant_id FROM contributors WHERE id=?").bind(x.contributorId).first();
         if (!c || !equal(c.leave_secret_hash, await hash(x.leaveSecret || "")))
             return fail("Invalid contributor presence credentials.", 403);
+        const session = await env.DB.prepare("SELECT realtimekit_meeting_id FROM broadcast_sessions WHERE id=?").bind(c.session_id).first();
         await roomPost(env, c.session_id, x.leave ? "leave" : "heartbeat", { contributorId: c.id, leaveSecretHash: c.leave_secret_hash });
+        if (x.leave && c.realtimekit_participant_id && session?.realtimekit_meeting_id) {
+            await realtimeKit(env, "/meetings/" + encodeURIComponent(session.realtimekit_meeting_id) + "/participants/" + encodeURIComponent(c.realtimekit_participant_id), "DELETE").catch(() => undefined);
+        }
         await env.DB.prepare("UPDATE contributors SET status=?,last_seen_at=? WHERE id=?").bind(x.leave ? "disconnected" : "publishing", now(), c.id).run();
         return json({ ok: true });
-    }
-    if (path === "/v1/media/renegotiate" && method === "POST") {
-        const x = await input(req), u = await auth(req, env);
-        const sub = await env.DB.prepare("SELECT sfu_session_id FROM media_subscriptions WHERE id=? AND owner_id=?").bind(x.subscriptionId, u.id).first();
-        if (!sub)
-            return fail("Media subscription not found.", 404);
-        await sfu(env, "/sessions/" + sub.sfu_session_id + "/renegotiate", "PUT", { sessionDescription: x.sessionDescription });
-        return json({ ok: true });
-    }
-    const subscribe = path.match(/^\/v1\/sessions\/([0-9a-f-]+)\/subscribe$/i);
-    if (subscribe && method === "POST") {
-        const { user, session } = await owner(req, env, subscribe[1]), x = await input(req), ids = (x.contributorIds || []).slice(0, 12);
-        if (!ids.length)
-            return fail("Select cameras to preview.");
-        const marks = ids.map(() => "?").join(","), rows = await env.DB.prepare("SELECT c.id,c.display_name,cp.sfu_session_id,cp.track_name,cp.kind FROM contributors c JOIN contributor_publications cp ON cp.contributor_id=c.id WHERE c.session_id=? AND c.status='publishing' AND c.id IN (" + marks + ") ORDER BY c.created_at").bind(session.id, ...ids).all();
-        if (!rows.results.length)
-            return fail("No active camera feeds are ready.", 409);
-        const created = await sfu(env, "/sessions/new"), sid = created.sessionId, tracks = rows.results.map(r => ({ location: "remote", sessionId: r.sfu_session_id, trackName: r.track_name }));
-        const result = await sfu(env, "/sessions/" + sid + "/tracks/new", "POST", { tracks }), subscriptionId = uuid();
-        await env.DB.prepare("INSERT INTO media_subscriptions(id,session_id,owner_id,sfu_session_id) VALUES(?,?,?,?)").bind(subscriptionId, session.id, user.id, sid).run();
-        return json({ subscriptionId, sessionId: sid, sessionDescription: result.sessionDescription, trackMap: rows.results.map((r, i) => ({ mid: result.tracks?.[i]?.mid, contributorId: r.id, displayName: r.display_name, trackName: r.track_name, kind: r.kind })) });
     }
     const sm = path.match(/^\/v1\/sessions\/([0-9a-f-]+)(?:\/(.*))?$/i);
     if (sm) {
         const { user, session } = await owner(req, env, sm[1]), action = sm[2] || "";
         if (!action && method === "GET") {
-            const [cs, assets, recordings, viewers] = await Promise.all([
-                env.DB.prepare("SELECT id,display_name,status,audio_muted,provider_identity,publisher_session_id,created_at FROM contributors WHERE session_id=? AND status!='removed' ORDER BY created_at").bind(session.id).all(),
+            const [cs, assets, recordings, viewers, roomResponse] = await Promise.all([
+                env.DB.prepare("SELECT id,display_name,status,audio_muted,realtimekit_participant_id,created_at FROM contributors WHERE session_id=? AND status!='removed' ORDER BY created_at").bind(session.id).all(),
                 env.DB.prepare("SELECT id,asset_kind,content_type,file_name,created_at FROM media_assets WHERE session_id=? ORDER BY created_at DESC").bind(session.id).all(),
-                env.DB.prepare("SELECT id,created_at,expires_at,deleted_at,size_bytes FROM recordings WHERE session_id=? AND deleted_at IS NULL AND expires_at>? ORDER BY created_at DESC").bind(session.id, now()).all(),
-                env.DB.prepare("SELECT count(*) AS count FROM viewer_presence WHERE session_id=? AND expires_at>?").bind(session.id, now()).first()
+                env.DB.prepare("SELECT id,provider_type,provider_recording_id,status,created_at,expires_at,deleted_at,size_bytes FROM recordings WHERE session_id=? AND deleted_at IS NULL AND expires_at>? ORDER BY created_at DESC").bind(session.id, now()).all(),
+                env.DB.prepare("SELECT count(*) AS count FROM viewer_presence WHERE session_id=? AND expires_at>?").bind(session.id, now()).first(),
+                room(env, session.id).fetch(new Request("https://session/snapshot"))
             ]);
-            const presence = await room(env, session.id).fetch(new Request("https://session/snapshot")), roomState = await presence.json();
-            return json({ session, contributors: cs.results, assets: assets.results, recordings: recordings.results, viewerCount: viewers?.count || 0, activeCameraSlots: roomState.active || 0, mediaEngine: "camera-ingest" });
+            const roomState = await roomResponse.json();
+            return json({ session, contributors: cs.results, assets: assets.results, recordings: recordings.results, viewerCount: viewers?.count || 0, activeCameraSlots: roomState.active || 0, mediaEngine: session.realtimekit_meeting_id ? "realtimekit" : "not-started", programmeAvailable: Boolean(session.playback_url), playbackUrl: session.playback_url });
         }
         if (action === "share-links" && method === "POST") {
             const cc = random(), vc = random();
@@ -199,23 +233,101 @@ async function handle(req, env) {
             return json({ contributorUrl: appUrl(env, { mode: "camera", code: cc }), viewerUrl: appUrl(env, { mode: "viewer", code: vc }) });
         }
         if (action === "start" && method === "POST") {
-            await env.DB.prepare("UPDATE broadcast_sessions SET status='live',live_started_at=? WHERE id=?").bind(now(), session.id).run();
-            return json({ sessionId: session.id, mediaEngine: "camera-ingest-ready", programmeStatus: "not-configured", message: "Camera feeds can publish. The independent programme compositor is not deployed yet." }, 202);
+            if (session.status === "ended")
+                return fail("An ended session cannot be restarted.", 409);
+            const meetingId = await ensureMeeting(env, session);
+            let livestreamId = session.realtimekit_livestream_id || "", playbackUrl = session.playback_url || "";
+            if (!livestreamId) {
+                const stream = await realtimeKit(env, "/meetings/" + encodeURIComponent(meetingId) + "/livestreams", "POST", { name: "gozie-live-" + session.public_id, video_config: { width: 1280, height: 720 } });
+                const streamInfo = stream.livestream || stream;
+                if (!streamInfo.id || !streamInfo.playback_url)
+                    throw new Error("RealtimeKit did not return a livestream playback URL.");
+                livestreamId = streamInfo.id;
+                playbackUrl = streamInfo.playback_url;
+                await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_livestream_id=?,playback_url=? WHERE id=?").bind(livestreamId, playbackUrl, session.id).run();
+            }
+            const token = await ensureHostParticipant(env, { ...session, realtimekit_meeting_id: meetingId }, user);
+            await env.DB.prepare("UPDATE broadcast_sessions SET status='live',live_started_at=COALESCE(live_started_at,?) WHERE id=?").bind(now(), session.id).run();
+            return json({ sessionId: session.id, meetingId, hostAuthToken: token.authToken, playbackUrl, mediaEngine: "realtimekit", programmeStatus: "livestream-created", message: "RealtimeKit meeting and final livestream have been created. Join the host room to bring cameras on air." }, 202);
+        }
+        if (action === "owner-token" && method === "POST") {
+            if (session.status !== "live" || !session.realtimekit_meeting_id)
+                return fail("Start this session before opening the host room.", 409);
+            return json(await ensureHostParticipant(env, session, user));
+        }
+        if (action === "recording/start" && method === "POST") {
+            if (session.status !== "live" || !session.realtimekit_meeting_id)
+                return fail("Start the live session before starting a recording.", 409);
+            if (session.realtimekit_recording_id) {
+                const current = await realtimeKit(env, "/recordings/" + encodeURIComponent(session.realtimekit_recording_id), "GET").catch(() => null);
+                if (current && ["INVOKED", "RECORDING", "UPLOADING"].includes(current.status))
+                    return json({ recordingId: session.realtimekit_recording_id, status: current.status, alreadyRecording: true });
+            }
+            const recording = await realtimeKit(env, "/recordings", "POST", {
+                meeting_id: session.realtimekit_meeting_id,
+                max_seconds: 86400,
+                realtimekit_bucket_config: { enabled: true },
+                video_config: { codec: "H264", width: 1280, height: 720, export_file: true },
+                audio_config: { channel: "stereo", codec: "AAC", export_file: false },
+                file_name_prefix: "gozie-live-" + session.public_id
+            });
+            const recordingInfo = recording.recording || recording;
+            if (!recordingInfo.id)
+                throw new Error("RealtimeKit did not return a recording ID.");
+            const providerRecordingId = recordingInfo.id, recordingId = uuid(), futureExpiry = "2099-12-31T23:59:59.999Z", objectKey = "realtimekit:" + providerRecordingId;
+            await env.DB.prepare("INSERT INTO recordings(id,session_id,object_key,created_at,expires_at,provider_type,provider_recording_id,download_url,status) VALUES(?,?,?,?,?,'realtimekit',?,?,?)")
+                .bind(recordingId, session.id, objectKey, now(), futureExpiry, recording.id, recordingInfo.download_url || null, recordingInfo.status || "INVOKED").run();
+            await env.DB.prepare("UPDATE broadcast_sessions SET realtimekit_recording_id=? WHERE id=?").bind(providerRecordingId, session.id).run();
+            return json({ recordingId: providerRecordingId, status: recordingInfo.status || "INVOKED", message: "Composite recording has been requested from RealtimeKit." }, 202);
+        }
+        if (action === "recording/stop" && method === "POST") {
+            if (!session.realtimekit_recording_id)
+                return fail("There is no recording to stop.", 404);
+            await realtimeKit(env, "/recordings/" + encodeURIComponent(session.realtimekit_recording_id), "PUT", { action: "stop" }).catch(() => undefined);
+            const details = await realtimeKit(env, "/recordings/" + encodeURIComponent(session.realtimekit_recording_id), "GET");
+            const expiry = session.ended_at ? new Date(new Date(session.ended_at).getTime() + 7 * 86400000).toISOString() : "2099-12-31T23:59:59.999Z";
+            await env.DB.prepare("UPDATE recordings SET download_url=?,status=?,expires_at=?,size_bytes=? WHERE provider_recording_id=? AND session_id=?")
+                .bind(details.download_url || null, details.status || "UPLOADING", expiry, details.file_size || null, session.realtimekit_recording_id, session.id).run();
+            return json({ recordingId: session.realtimekit_recording_id, status: details.status, downloadReady: Boolean(details.download_url), expiresAt: expiry });
         }
         if (action === "end" && method === "POST") {
-            await env.DB.prepare("UPDATE broadcast_sessions SET status='ended',ended_at=? WHERE id=?").bind(now(), session.id).run();
-            return json({ sessionId: session.id, mediaEngine: "ended", recordingAvailable: false, message: "Recording becomes available after the programme compositor is connected." });
+            if (session.status === "ended")
+                return json({ sessionId: session.id, mediaEngine: "ended", recordingRetentionUntil: session.ended_at ? new Date(new Date(session.ended_at).getTime() + 7 * 86400000).toISOString() : null });
+            const endedAt = now();
+            if (session.realtimekit_recording_id) {
+                await realtimeKit(env, "/recordings/" + encodeURIComponent(session.realtimekit_recording_id), "PUT", { action: "stop" }).catch(() => undefined);
+                const detail = await realtimeKit(env, "/recordings/" + encodeURIComponent(session.realtimekit_recording_id), "GET").catch(() => null);
+                const expiry = new Date(new Date(endedAt).getTime() + 7 * 86400000).toISOString();
+                await env.DB.prepare("UPDATE recordings SET download_url=?,status=?,expires_at=?,size_bytes=? WHERE provider_recording_id=? AND session_id=?")
+                    .bind(detail?.download_url || null, detail?.status || "UPLOADING", expiry, detail?.file_size || null, session.realtimekit_recording_id, session.id).run();
+            }
+            if (session.realtimekit_meeting_id && session.realtimekit_livestream_id) {
+                await realtimeKit(env, "/meetings/" + encodeURIComponent(session.realtimekit_meeting_id) + "/active-livestream/stop", "POST", {}).catch(() => undefined);
+            }
+            await env.DB.prepare("UPDATE broadcast_sessions SET status='ended',ended_at=? WHERE id=?").bind(endedAt, session.id).run();
+            return json({ sessionId: session.id, mediaEngine: "ended", recordingAvailable: Boolean(session.realtimekit_recording_id), recordingRetentionUntil: new Date(new Date(endedAt).getTime() + 7 * 86400000).toISOString() });
         }
         if (action === "production" && method === "POST") {
             const x = await input(req), allowed = new Set(["select-source", "mute-contributor", "set-audio-mix", "set-media-source", "start-recording", "stop-recording"]);
             if (!allowed.has(x.command))
                 return fail("Unsupported command.");
             await env.DB.prepare("INSERT INTO production_commands(id,session_id,requested_by,command_type,payload,status) VALUES(?,?,?,?,?,'pending')").bind(uuid(), session.id, user.id, x.command, JSON.stringify(x.payload || {})).run();
-            if (x.command === "mute-contributor" && typeof x.payload?.contributorId === "string" && typeof x.payload?.muted === "boolean")
+            if (x.command === "mute-contributor" && typeof x.payload?.contributorId === "string" && typeof x.payload?.muted === "boolean") {
+                const contributor = await env.DB.prepare("SELECT realtimekit_participant_id FROM contributors WHERE id=? AND session_id=?").bind(x.payload.contributorId, session.id).first();
+                if (!contributor?.realtimekit_participant_id)
+                    return fail("Camera participant not found or not connected.", 404);
+                if (x.payload.muted && session.realtimekit_meeting_id)
+                    await realtimeKit(env, "/meetings/" + encodeURIComponent(session.realtimekit_meeting_id) + "/active-session/mute", "POST", { participant_ids: [contributor.realtimekit_participant_id] });
                 await env.DB.prepare("UPDATE contributors SET audio_muted=? WHERE id=? AND session_id=?").bind(x.payload.muted ? 1 : 0, x.payload.contributorId, session.id).run();
-            if (x.command === "set-audio-mix" && typeof x.payload?.muteAll === "boolean")
+                return json({ accepted: true, applied: Boolean(x.payload.muted), message: x.payload.muted ? "Participant microphone muted by the host." : "Use the host meeting controls to unmute this participant." }, 202);
+            }
+            if (x.command === "set-audio-mix" && typeof x.payload?.muteAll === "boolean") {
+                if (x.payload.muteAll && session.realtimekit_meeting_id)
+                    await realtimeKit(env, "/meetings/" + encodeURIComponent(session.realtimekit_meeting_id) + "/active-session/mute-all", "POST", { allow_unmute: true });
                 await env.DB.prepare("UPDATE contributors SET audio_muted=? WHERE session_id=?").bind(x.payload.muteAll ? 1 : 0, session.id).run();
-            return json({ accepted: true, applied: false, message: "Stored for the compositor. This command is not yet applied to a programme output." }, 202);
+                return json({ accepted: true, applied: Boolean(x.payload.muteAll), message: x.payload.muteAll ? "All participant microphones muted." : "Use the RealtimeKit host controls to unmute participants." }, 202);
+            }
+            return json({ accepted: true, applied: false, message: x.command === "select-source" ? "Use RealtimeKit's spotlight/pin control in the host meeting to select the programme focus." : "Asset controls are stored; direct insertion into the programme mix is not connected yet." }, 202);
         }
         if (action === "assets" && method === "POST") {
             const form = await req.formData(), file = form.get("file");
@@ -242,14 +354,44 @@ async function handle(req, env) {
         }
     }
     if (path === "/v1/public/session" && method === "GET") {
-        const s = await byCode(env, url.searchParams.get("code") || "", "viewer"), recs = await env.DB.prepare("SELECT id,expires_at,size_bytes FROM recordings WHERE session_id=? AND deleted_at IS NULL AND expires_at>?").bind(s.id, now()).all();
-        return json({ session: { id: s.id, title: s.title, status: s.status, scheduled_at: s.scheduled_at, ended_at: s.ended_at }, recordings: recs.results, programmeAvailable: Boolean(s.programme_uid) });
+        const s = await byCode(env, url.searchParams.get("code") || "", "viewer");
+        const recs = await env.DB.prepare("SELECT id,provider_type,status,expires_at,size_bytes FROM recordings WHERE session_id=? AND deleted_at IS NULL AND expires_at>? ORDER BY created_at DESC").bind(s.id, now()).all();
+        return json({ session: { id: s.id, title: s.title, status: s.status, scheduled_at: s.scheduled_at, ended_at: s.ended_at }, recordings: recs.results, programmeAvailable: Boolean(s.playback_url), playbackUrl: s.playback_url });
     }
     if (path === "/v1/recordings/download" && method === "GET") {
-        const u = await auth(req, env), rid = url.searchParams.get("id") || "", r = await env.DB.prepare("SELECT rec.object_key FROM recordings rec JOIN broadcast_sessions s ON s.id=rec.session_id WHERE rec.id=? AND s.owner_id=? AND rec.deleted_at IS NULL AND rec.expires_at>?").bind(rid, u.id, now()).first();
-        if (!r)
-            return fail("Recording unavailable.", 404);
-        const obj = await env.MEDIA_BUCKET.get(r.object_key);
+        const u = await auth(req, env), rid = url.searchParams.get("id") || "";
+        const row = await env.DB.prepare("SELECT rec.provider_type,rec.provider_recording_id,rec.object_key FROM recordings rec JOIN broadcast_sessions s ON s.id=rec.session_id WHERE rec.id=? AND s.owner_id=? AND rec.deleted_at IS NULL AND rec.expires_at>?").bind(rid, u.id, now()).first();
+        if (!row)
+            return fail("Recording unavailable or expired.", 404);
+        if (row.provider_type === "realtimekit" && row.provider_recording_id) {
+            const details = await realtimeKit(env, "/recordings/" + encodeURIComponent(row.provider_recording_id), "GET");
+            if (!details.download_url)
+                return fail("Recording is still being processed. Try again later.", 409);
+            const target = new URL(details.download_url);
+            if (target.protocol !== "https:")
+                return fail("Recording download URL is invalid.", 502);
+            return Response.redirect(target.toString(), 302);
+        }
+        const obj = await env.MEDIA_BUCKET.get(row.object_key);
+        if (!obj?.body)
+            return fail("Recording file missing.", 404);
+        return new Response(obj.body, { headers: { "content-type": "video/mp4", "content-disposition": "attachment", "cache-control": "private,no-store" } });
+    }
+    if (path === "/v1/public/recordings/download" && method === "GET") {
+        const session = await byCode(env, url.searchParams.get("code") || "", "viewer"), rid = url.searchParams.get("id") || "";
+        const row = await env.DB.prepare("SELECT provider_type,provider_recording_id,object_key FROM recordings WHERE id=? AND session_id=? AND deleted_at IS NULL AND expires_at>?").bind(rid, session.id, now()).first();
+        if (!row)
+            return fail("Recording unavailable or expired.", 404);
+        if (row.provider_type === "realtimekit" && row.provider_recording_id) {
+            const details = await realtimeKit(env, "/recordings/" + encodeURIComponent(row.provider_recording_id), "GET");
+            if (!details.download_url)
+                return fail("Recording is still being processed. Try again later.", 409);
+            const target = new URL(details.download_url);
+            if (target.protocol !== "https:")
+                return fail("Recording download URL is invalid.", 502);
+            return Response.redirect(target.toString(), 302);
+        }
+        const obj = await env.MEDIA_BUCKET.get(row.object_key);
         if (!obj?.body)
             return fail("Recording file missing.", 404);
         return new Response(obj.body, { headers: { "content-type": "video/mp4", "content-disposition": "attachment", "cache-control": "private,no-store" } });
@@ -319,10 +461,11 @@ export default {
         }
     },
     async scheduled(_controller, env) {
-        const rows = await env.DB.prepare("SELECT id,object_key FROM recordings WHERE expires_at<=? AND deleted_at IS NULL LIMIT 100").bind(now()).all();
+        const rows = await env.DB.prepare("SELECT id,object_key,provider_type FROM recordings WHERE expires_at<=? AND deleted_at IS NULL LIMIT 100").bind(now()).all();
         for (const r of rows.results) {
-            await env.MEDIA_BUCKET.delete(r.object_key);
-            await env.DB.prepare("UPDATE recordings SET deleted_at=? WHERE id=?").bind(now(), r.id).run();
+            if (r.provider_type !== "realtimekit")
+                await env.MEDIA_BUCKET.delete(r.object_key);
+            await env.DB.prepare("UPDATE recordings SET deleted_at=?,status='expired' WHERE id=?").bind(now(), r.id).run();
         }
         await env.DB.prepare("DELETE FROM auth_sessions WHERE expires_at<=?").bind(now()).run();
         await env.DB.prepare("DELETE FROM viewer_presence WHERE expires_at<=?").bind(now()).run();
