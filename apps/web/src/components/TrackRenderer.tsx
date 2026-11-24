@@ -3,24 +3,26 @@ import type { RemoteTrack } from "livekit-client";
 import { Track } from "livekit-client";
 
 export default function TrackRenderer({ track, label }: { track: RemoteTrack; label?: string }) {
-  const ref = useRef<HTMLVideoElement & HTMLAudioElement>(null);
+  const container = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const mount = container.current;
+    if (!mount) return;
     const element = track.kind === Track.Kind.Video ? document.createElement("video") : document.createElement("audio");
     if (track.kind === Track.Kind.Video) {
-      (element as HTMLVideoElement).autoplay = true;
-      (element as HTMLVideoElement).playsInline = true;
-      (element as HTMLVideoElement).muted = true;
+      const video = element as HTMLVideoElement;
+      video.autoplay = true;
+      video.playsInline = true;
+      video.muted = true;
     } else {
       (element as HTMLAudioElement).autoplay = true;
     }
+    if (label) element.setAttribute("aria-label", label);
+    mount.appendChild(element);
     track.attach(element);
-    const target = ref.current;
-    if (target) {
-      target.replaceWith(element);
-      (element as HTMLVideoElement & HTMLAudioElement).dataset.track = "livekit";
-      if (label) element.setAttribute("aria-label", label);
-    }
-    return () => { track.detach(element); element.remove(); };
+    return () => {
+      track.detach(element);
+      element.remove();
+    };
   }, [track, label]);
-  return <span ref={ref as React.RefObject<HTMLVideoElement & HTMLAudioElement>} className="track-mount" />;
+  return <div ref={container} className="track-mount" />;
 }
