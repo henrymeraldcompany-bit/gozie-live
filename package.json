@@ -1,0 +1,12 @@
+{
+  "name": "gozie-live",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": ["apps/*", "services/*", "packages/*"],
+  "scripts": {
+    "dev": "npm run dev --workspace @gozie-live/web",
+    "build": "npm run build --workspace @gozie-live/web",
+    "typecheck": "npm run typecheck --workspace @gozie-live/web"
+  },
+  "engines": { "node": ">=20" }
+}
