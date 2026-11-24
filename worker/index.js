@@ -63,8 +63,26 @@ function room(env, id) { return env.SESSION_ROOMS.get(env.SESSION_ROOMS.idFromNa
 async function roomPost(env, sid, action, data) { return room(env, sid).fetch(new Request("https://session/" + action, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(data) })); }
 async function handle(req, env) {
     const url = new URL(req.url), path = url.pathname.replace(/\/$/, "") || "/", method = req.method;
-    if (path === "/health")
-        return json({ ok: true, service: "GOZIE LIVE", database: "Cloudflare D1", media: "Cloudflare Realtime SFU", time: now() });
+    if (path === "/health") {
+        let database = "unavailable";
+        try {
+            const probe = await env.DB.prepare("SELECT 1 AS ok").first();
+            database = probe?.ok === 1 ? "connected" : "error";
+        }
+        catch {
+            database = "error";
+        }
+        const status = {
+            ok: database === "connected",
+            service: "GOZIE LIVE",
+            database,
+            r2: env.MEDIA_BUCKET ? "configured" : "missing",
+            realtimeSfu: env.REALTIME_SFU_APP_SECRET ? "configured" : "needs-worker-secret",
+            emailVerification: env.EMAIL && env.EMAIL_FROM ? "configured" : "needs-sending-domain-and-email-binding",
+            time: now()
+        };
+        return json(status, status.ok ? 200 : 503);
+    }
     if (path === "/v1/auth/register" && method === "POST") {
         const x = await input(req), email = (x.email || "").trim().toLowerCase(), name = (x.displayName || "").trim();
         if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254)
