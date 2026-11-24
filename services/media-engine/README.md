@@ -1,17 +1,20 @@
-# GOZIE LIVE production engine
+# GOZIE LIVE production renderer
 
-This service is intentionally separated from the admin browser. The target implementation is a long-running media worker that:
+The current implementation uses LiveKit's server-managed Egress compositor rather than running media processing inside the host's browser.
 
-1. Joins the session's LiveKit contributor room as a server-side subscriber.
-2. Subscribes to incoming camera and audio tracks.
-3. Applies queued production commands (source selection, media replacement, contributor mute and audio gain).
-4. Composites a single programme video and mixes a single programme audio bus.
-5. Publishes only that output to the session's separate LiveKit programme room.
-6. Records the exact programme output that viewers receive.
-7. Finalizes recording metadata through the API's internal recording endpoint after the session ends.
+## Implemented orchestration path
 
-## Current status
+- The API creates a dedicated programme-room RTMP ingress.
+- It starts LiveKit composite Egress on the contributor room with the custom template URL `/?mode=engine&sessionId=...&controlCode=...`.
+- LiveKit appends the recorder's room URL and short-lived recorder token to the template URL. The template connects to the contributor room and signals `START_RECORDING` after the connection succeeds.
+- The renderer shows the currently selected camera, or replaces that picture with an uploaded image/video. Contributor audio tracks are independently attached; the host's mute state is polled from the API.
+- The same Egress outputs the composition to the programme-room RTMP ingress and, when R2 S3 credentials are configured, to an MP4 file in private R2.
+- The API stops Egress when the host ends the session, checks for the finished R2 object, registers recording metadata, and sets expiry to seven days after the session end.
 
-This folder is an integration contract and deployment boundary, not a functioning compositor. The API queues production commands and issues role-scoped SFU tokens, but there is not yet a media worker consuming commands, mixing media, publishing output, or recording. Viewer playback therefore remains offline until this service is implemented and deployed.
+## Important boundaries
 
-A production implementation needs dedicated compute, restart supervision, resource limits, observability, and benchmarked capacity. Do not attempt 100–200 full-resolution source compositing on the admin phone. Use low-resolution multiview previews and progressively test 1, 5, 20, 50, 100, 150, and 200 publishers.
+This integration is committed but has not been deployed or tested against a real LiveKit Cloud project. It depends on the frontend being deployed and `APP_ORIGIN` being set to that origin. It also depends on LiveKit Egress/Ingress being enabled for the project.
+
+R2 recording requires `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_S3_ENDPOINT` as Worker secrets. Without them, the API may start the live programme output, but no recording file is requested.
+
+A 100–200 contributor target needs progressive load tests. Egress decode/composition, SFU bandwidth, R2 upload, network quality and viewer distribution need real measurements. The admin monitor is paginated to avoid attempting to render 200 full-resolution camera previews on a phone. Mobile operating systems can still suspend contributor capture when a phone is locked or the browser is backgrounded.

@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "npm run dev --workspace @gozie-live/web",
     "build": "npm run build --workspace @gozie-live/web",
-    "typecheck": "npm run typecheck --workspace @gozie-live/web && npm run typecheck --workspace @gozie-live/api"
+    "typecheck": "npm run typecheck --workspace @gozie-live/web && npm run typecheck --workspace @gozie-live/api",
+    "deploy:web": "npm run deploy --workspace @gozie-live/web",
+    "deploy:api": "npm run deploy --workspace @gozie-live/api"
   },
   "engines": { "node": ">=22.22" }
 }
