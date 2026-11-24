@@ -15,3 +15,7 @@ jobs:
       - run: npm install
       - run: npm run typecheck
       - run: npm run build
+      - name: Validate API Worker bundle
+        run: npx wrangler deploy --dry-run --config services/api/wrangler.toml
+      - name: Validate static web Worker assets
+        run: npx wrangler deploy --dry-run --config apps/web/wrangler.toml
