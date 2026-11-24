@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Activity, Camera, Check, CircleHelp, Clapperboard, Copy, Eye, FileAudio, FileImage, FileVideo, LogOut, Mic, MonitorPlay, Radio, ShieldCheck, Upload, Users, Video, VolumeX } from "lucide-react";
+import { Activity, Camera, CircleHelp, Clapperboard, Copy, Eye, FileAudio, FileImage, FileVideo, LogOut, Mic, MonitorPlay, Radio, ShieldCheck, Upload, Users, Video, VolumeX } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { Room } from "livekit-client";
 import type { RemoteParticipant, RemoteTrack } from "livekit-client";
-import { RoomEvent, Track } from "livekit-client";
+import { RoomEvent } from "livekit-client";
 import { apiRequest, getSupabase } from "../lib/api";
 import TrackRenderer from "./TrackRenderer";
 
@@ -103,12 +103,13 @@ export default function AdminStudio({ userEmail }: { userEmail: string }) {
         method:"POST",body:JSON.stringify({command,payload})
       });
       setMessage(result.applied ? "Production control applied." : result.message);
+      await refreshDetail();
     } catch(err) { setError(err instanceof Error ? err.message : "Production control failed."); }
   }
   async function sessionAction(action:"start"|"end") {
     if (!selectedId) return;
     try {
-      const result=await apiRequest<{session:Session;broadcastOutput?:string}>("/v1/sessions/"+selectedId+"/"+action,{method:"POST"});
+      await apiRequest<{session:Session;broadcastOutput?:string}>("/v1/sessions/"+selectedId+"/"+action,{method:"POST"});
       setMessage(action==="start" ? "Session marked live. The final programme remains offline until the production engine is deployed." : "Session ended. Recording retention is scheduled for seven days after the end time.");
       await refreshSessions(); await refreshDetail();
     } catch(err) { setError(err instanceof Error ? err.message : "Session update failed."); }
