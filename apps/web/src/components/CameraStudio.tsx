@@ -4,7 +4,15 @@ import { createLocalTracks, Room } from "livekit-client";
 import type { LocalTrack } from "livekit-client";
 import { apiRequest } from "../lib/api";
 
-type JoinResult = { session: { id: string; title: string }; contributor: { id: string }; livekitUrl: string; token: string };
+type JoinResult = {
+  session: { id: string; title: string };
+  contributor: { id: string };
+  leaveSecret: string;
+  livekitUrl: string;
+  token: string;
+};
+type ContributorPresence = { contributorId: string; leaveSecret: string };
+
 export default function CameraStudio({ code }: { code: string }) {
   const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
@@ -16,6 +24,10 @@ export default function CameraStudio({ code }: { code: string }) {
   const [room, setRoom] = useState<Room | null>(null);
   const [tracks, setTracks] = useState<LocalTrack[]>([]);
   const preview = useRef<HTMLVideoElement>(null);
+  const roomRef = useRef<Room | null>(null);
+  const tracksRef = useRef<LocalTrack[]>([]);
+  const presenceRef = useRef<ContributorPresence | null>(null);
+  const heartbeatRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!connected || !preview.current) return;
@@ -25,22 +37,61 @@ export default function CameraStudio({ code }: { code: string }) {
     return () => { videoTrack.detach(preview.current!); };
   }, [connected, tracks]);
 
+  useEffect(() => {
+    return () => {
+      if (heartbeatRef.current !== null) window.clearInterval(heartbeatRef.current);
+      const presence = presenceRef.current;
+      if (presence) {
+        void apiRequest("/v1/contributors/presence", {
+          method: "POST",
+          body: JSON.stringify({ ...presence, leave: true })
+        }).catch(() => undefined);
+      }
+      tracksRef.current.forEach(track => { track.detach(); track.stop(); });
+      void roomRef.current?.disconnect();
+    };
+  }, []);
+
   async function join(event: React.FormEvent) {
     event.preventDefault(); setBusy(true); setError("");
     let localTracks: LocalTrack[] = [];
     let nextRoom: Room | null = null;
     try {
       if (!code) throw new Error("This camera link is missing its session code. Ask the host for a new contributor link.");
-      // Ask for camera/microphone permission before registering this person as connected.
+      // Ask for camera/microphone permission before reserving a contributor slot.
       localTracks = await createLocalTracks({ audio: true, video: { facingMode: "user", resolution: { width: 1280, height: 720 } } });
       const result = await apiRequest<JoinResult>("/v1/join/contributor", { method: "POST", body: JSON.stringify({ code, displayName: displayName.trim() }) });
+      presenceRef.current = { contributorId: result.contributor.id, leaveSecret: result.leaveSecret };
       nextRoom = new Room({ adaptiveStream: true, dynacast: true });
+      roomRef.current = nextRoom;
+      tracksRef.current = localTracks;
       await nextRoom.connect(result.livekitUrl, result.token);
       for (const track of localTracks) await nextRoom.localParticipant.publishTrack(track);
       setTracks(localTracks); setRoom(nextRoom); setSessionTitle(result.session.title); setConnected(true);
+      heartbeatRef.current = window.setInterval(() => {
+        const presence = presenceRef.current;
+        if (!presence) return;
+        void apiRequest("/v1/contributors/presence", {
+          method: "POST",
+          body: JSON.stringify(presence)
+        }).catch(() => {
+          setError("Your camera connection may have expired. Check your network before continuing.");
+        });
+      }, 20000);
     } catch (err) {
       localTracks.forEach(track => { track.detach(); track.stop(); });
       await nextRoom?.disconnect();
+      tracksRef.current = [];
+      roomRef.current = null;
+      if (heartbeatRef.current !== null) window.clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+      const presence = presenceRef.current;
+      if (presence) {
+        await apiRequest("/v1/contributors/presence", {
+          method: "POST", body: JSON.stringify({ ...presence, leave: true })
+        }).catch(() => undefined);
+        presenceRef.current = null;
+      }
       setError(err instanceof Error ? err.message : "Unable to join the camera room.");
     } finally { setBusy(false); }
   }
@@ -55,8 +106,19 @@ export default function CameraStudio({ code }: { code: string }) {
     catch (err) { setError(err instanceof Error ? err.message : "Could not change microphone state."); }
   }
   async function leave() {
-    tracks.forEach(track => { track.detach(); track.stop(); });
-    await room?.disconnect();
+    if (heartbeatRef.current !== null) window.clearInterval(heartbeatRef.current);
+    heartbeatRef.current = null;
+    const presence = presenceRef.current;
+    presenceRef.current = null;
+    if (presence) {
+      await apiRequest("/v1/contributors/presence", {
+        method: "POST", body: JSON.stringify({ ...presence, leave: true })
+      }).catch(() => undefined);
+    }
+    tracksRef.current.forEach(track => { track.detach(); track.stop(); });
+    tracksRef.current = [];
+    await roomRef.current?.disconnect();
+    roomRef.current = null;
     setTracks([]); setRoom(null); setConnected(false); setCameraOn(true); setMicOn(true);
   }
 
@@ -81,6 +143,6 @@ export default function CameraStudio({ code }: { code: string }) {
         </div>
       </>}
     </section>
-    <footer className="public-footer">GOZIE LIVE · Camera capture may pause if your phone locks or the browser is sent to the background.</footer>
+    <footer className="public-footer">GOZIE LIVE · Camera capture may pause if your phone locks or the browser is sent to the background. Abandoned contributor slots expire after 60 seconds without a heartbeat.</footer>
   </main>;
 }
