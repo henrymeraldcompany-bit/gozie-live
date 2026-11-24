@@ -250,10 +250,21 @@ async function handle(request: Request, env: Env): Promise<Response> {
       const body = await jsonBody<{ command?: string; payload?: Record<string, unknown> }>(request);
       const allowed = new Set(["select-source", "mute-contributor", "set-audio-mix", "set-media-source", "start-recording", "stop-recording"]);
       if (!body.command || !allowed.has(body.command)) return fail("Unsupported production command.");
+      const payload = body.payload ?? {};
       const inserted = await db<Array<{ id: string }>>(env, "production_commands", {
         method: "POST", headers: { prefer: "return=representation" },
-        body: JSON.stringify({ session_id: id, requested_by: user.id, command_type: body.command, payload: body.payload ?? {}, status: "pending" })
+        body: JSON.stringify({ session_id: id, requested_by: user.id, command_type: body.command, payload, status: "pending" })
       });
+      if (body.command === "mute-contributor" && typeof payload.contributorId === "string" && typeof payload.muted === "boolean") {
+        await db(env, "contributors?id=eq." + encodeURIComponent(payload.contributorId) + "&session_id=eq." + id, {
+          method: "PATCH", headers: { prefer: "return=minimal" }, body: JSON.stringify({ audio_muted: payload.muted })
+        });
+      }
+      if (body.command === "set-audio-mix" && typeof payload.muteAll === "boolean") {
+        await db(env, "contributors?session_id=eq." + id + "&status=neq.removed", {
+          method: "PATCH", headers: { prefer: "return=minimal" }, body: JSON.stringify({ audio_muted: payload.muteAll })
+        });
+      }
       return json({ commandId: inserted[0].id, accepted: true, applied: false, mediaEngine: "not-connected", message: "Saved for the production engine. It has not been applied to a live programme." }, 202);
     }
     if (action === "assets" && request.method === "POST") {
