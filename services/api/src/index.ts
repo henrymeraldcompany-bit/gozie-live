@@ -175,8 +175,20 @@ export class SessionRoom {
 }
 export default {
  async fetch(req:Request,env:Env){
-  try{const p=new URL(req.url).pathname,res=await handle(req,env);if(res.status!==404||p.startsWith("/v1/")||p==="/health")return res;return env.ASSETS?env.ASSETS.fetch(req):res;}
-  catch(e){if(e instanceof Response)return e;return json({error:e instanceof Error?e.message:"Unexpected server error."},500);}
+  try{
+   const original=new URL(req.url),p=original.pathname;
+   if(p==="/gozie-live")return Response.redirect(new URL("/gozie-live/",original),308);
+   const res=await handle(req,env);
+   if(res.status!==404||p.startsWith("/v1/")||p==="/health")return res;
+   if(!env.ASSETS)return res;
+   const assetUrl=new URL(req.url);
+   if(assetUrl.pathname==="/gozie-live/"||assetUrl.pathname.startsWith("/gozie-live/")){
+    assetUrl.pathname=assetUrl.pathname.slice("/gozie-live".length)||"/";
+   }else if(assetUrl.pathname!=="/"){
+    return res;
+   }
+   return env.ASSETS.fetch(new Request(assetUrl,req));
+  }catch(e){if(e instanceof Response)return e;return json({error:e instanceof Error?e.message:"Unexpected server error."},500);}
  },
  async scheduled(_controller:unknown,env:Env){
   const rows=await env.DB.prepare("SELECT id,object_key FROM recordings WHERE expires_at<=? AND deleted_at IS NULL LIMIT 100").bind(now()).all<{id:string;object_key:string}>();
