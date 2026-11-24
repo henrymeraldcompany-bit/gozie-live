@@ -1,5 +1,5 @@
 import {useEffect,useMemo,useState} from "react";
-import {Activity,CalendarClock,Camera,Copy,Download,LogOut,Mic,MicOff,Play,Radio,RefreshCw,Share2,Square,Upload,Users,Video,VideoOff} from "lucide-react";
+import {Camera,Copy,Download,LogOut,Mic,MicOff,Play,Radio,RefreshCw,Share2,Square,Upload,Users,Video} from "lucide-react";
 import {QRCodeSVG} from "qrcode.react";
 import {apiRequest} from "../lib/api";
 import RealtimeKitRoom from "./RealtimeKitRoom";
