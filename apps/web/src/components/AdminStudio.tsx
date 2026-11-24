@@ -1,68 +1,224 @@
-import {useCallback,useEffect,useMemo,useRef,useState} from "react";
-import {Activity,Camera,Copy,LogOut,Mic,MicOff,MonitorPlay,Radio,Share2,Upload,Users,Video} from "lucide-react";
+import {useEffect,useMemo,useState} from "react";
+import {Activity,CalendarClock,Camera,Copy,Download,LogOut,Mic,MicOff,Play,Radio,RefreshCw,Share2,Square,Upload,Users,Video,VideoOff} from "lucide-react";
 import {QRCodeSVG} from "qrcode.react";
 import {apiRequest} from "../lib/api";
-import {createPeerConnection,waitForIce} from "../lib/realtime";
-type Session={id:string;title:string;status:string;scheduled_at:string|null;live_started_at?:string|null;ended_at?:string|null};
-type CameraRow={id:string;display_name:string;status:string;audio_muted:boolean;publisher_session_id?:string|null};
-type Asset={id:string;asset_kind:string;content_type:string;file_name:string};
-type Detail={session:Session;contributors:CameraRow[];assets:Asset[];recordings:Array<{id:string;expires_at:string;size_bytes:number|null}>;viewerCount:number;activeCameraSlots:number;mediaEngine:string};
+import RealtimeKitRoom from "./RealtimeKitRoom";
+import HlsPlayer from "./HlsPlayer";
+
+type Session={
+ id:string;title:string;status:string;scheduled_at:string|null;live_started_at?:string|null;ended_at?:string|null;
+ playback_url?:string|null;
+};
+type CameraRow={id:string;display_name:string;status:string;audio_muted:boolean;realtimekit_participant_id?:string|null};
+type Asset={id:string;asset_kind:string;content_type:string;file_name:string;created_at?:string};
+type Recording={id:string;provider_type:string;status:string;created_at:string;expires_at:string;size_bytes:number|null;deleted_at:string|null};
+type Detail={
+ session:Session;contributors:CameraRow[];assets:Asset[];recordings:Recording[];
+ viewerCount:number;activeCameraSlots:number;mediaEngine:string;programmeAvailable:boolean;playbackUrl:string|null;
+};
 type Shares={contributorUrl:string;viewerUrl:string};
-type RemoteMap={mid?:string;contributorId:string;displayName:string;trackName:string;kind:string};
+
 export default function AdminStudio({userEmail,onSignOut}:{userEmail:string;onSignOut:()=>void}){
- const [sessions,setSessions]=useState<Session[]>([]),[selectedId,setSelectedId]=useState(""),[detail,setDetail]=useState<Detail|null>(null);
- const [title,setTitle]=useState(""),[schedule,setSchedule]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState(""),[message,setMessage]=useState("");
- const [shares,setShares]=useState<Shares|null>(null),[page,setPage]=useState(0),[streams,setStreams]=useState<Record<string,MediaStream>>({}),[selectedSource,setSelectedSource]=useState("");
- const [programmeNotice,setProgrammeNotice]=useState("The final programme compositor is not deployed yet.");
+ const [sessions,setSessions]=useState<Session[]>([]);
+ const [selectedId,setSelectedId]=useState("");
+ const [detail,setDetail]=useState<Detail|null>(null);
+ const [title,setTitle]=useState("");
+ const [schedule,setSchedule]=useState("");
+ const [shares,setShares]=useState<Shares|null>(null);
+ const [hostToken,setHostToken]=useState("");
+ const [busy,setBusy]=useState(false);
+ const [recordingBusy,setRecordingBusy]=useState(false);
+ const [error,setError]=useState("");
+ const [message,setMessage]=useState("");
  const [showShares,setShowShares]=useState(false);
- const pcRef=useRef<RTCPeerConnection|null>(null);
- const activeCameras=useMemo(()=>detail?.contributors.filter(c=>c.status==="publishing"&&c.publisher_session_id)||[],[detail]);
- const pageSize=12,pageCount=Math.max(1,Math.ceil(activeCameras.length/pageSize));
- const pageCameras=activeCameras.slice(page*pageSize,(page+1)*pageSize);
- const refreshSessions=useCallback(async()=>{const rows=await apiRequest<Session[]>("/v1/sessions");setSessions(rows);if(!selectedId&&rows[0])setSelectedId(rows[0].id);},[selectedId]);
- const refreshDetail=useCallback(async()=>{if(!selectedId){setDetail(null);return;}const d=await apiRequest<Detail>("/v1/sessions/"+selectedId);setDetail(d);},[selectedId]);
- useEffect(()=>{void refreshSessions().catch(e=>setError(e.message));},[refreshSessions]);
- useEffect(()=>{setPage(0);setStreams({});void refreshDetail().catch(e=>setError(e.message));},[selectedId,refreshDetail]);
- useEffect(()=>{if(!selectedId)return;const t=window.setInterval(()=>{void refreshDetail().catch(()=>{});void refreshSessions().catch(()=>{});},7000);return()=>window.clearInterval(t);},[selectedId,refreshDetail,refreshSessions]);
+
+ const refreshSessions=async()=>{
+  const rows=await apiRequest<Session[]>("/v1/sessions");
+  setSessions(rows);
+  if(!selectedId&&rows.length)setSelectedId(rows[0].id);
+ };
+ const refreshDetail=async(id=selectedId)=>{
+  if(!id){setDetail(null);return;}
+  const result=await apiRequest<Detail>("/v1/sessions/"+id);
+  setDetail(result);
+ };
+ useEffect(()=>{void refreshSessions().catch(e=>setError(e.message));},[]);
  useEffect(()=>{
-  if(!selectedId||!pageCameras.length)return;
-  let alive=true;const pc=createPeerConnection();pcRef.current=pc;const mapping=new Map<string,RemoteMap>();
-  pc.ontrack=(ev)=>{if(!alive)return;const map=mapping.get(ev.transceiver.mid||"");if(!map)return;setStreams(prev=>{const next={...prev},stream=next[map.contributorId]||new MediaStream();if(!stream.getTracks().some(t=>t.id===ev.track.id))stream.addTrack(ev.track);next[map.contributorId]=stream;return next;});};
-  (async()=>{try{
-   const result=await apiRequest<{subscriptionId:string;sessionDescription:{type:RTCSdpType;sdp:string};trackMap:RemoteMap[]}>("/v1/sessions/"+selectedId+"/subscribe",{method:"POST",body:JSON.stringify({contributorIds:pageCameras.map(c=>c.id)})});
-   if(!alive)return;for(const m of result.trackMap)if(m.mid)mapping.set(m.mid,m);
-   await pc.setRemoteDescription(result.sessionDescription);const answer=await pc.createAnswer();await pc.setLocalDescription(answer);await waitForIce(pc);
-   await apiRequest("/v1/media/renegotiate",{method:"POST",body:JSON.stringify({subscriptionId:result.subscriptionId,sessionDescription:pc.localDescription})});
-  }catch(e){if(alive)setError(e instanceof Error?e.message:"Could not subscribe to camera feeds.");}})();
-  return()=>{alive=false;pc.close();if(pcRef.current===pc)pcRef.current=null;setStreams({});};
- },[selectedId,page,activeCameras.map(c=>c.id+":"+c.status).join("|")]);
- async function createSession(e:React.FormEvent){e.preventDefault();setBusy(true);setError("");setMessage("");try{const r=await apiRequest<{session:Session;contributorUrl:string;viewerUrl:string}>("/v1/sessions",{method:"POST",body:JSON.stringify({title,scheduledAt:schedule?new Date(schedule).toISOString():null})});setTitle("");setSchedule("");setSessions(s=>[r.session,...s]);setSelectedId(r.session.id);setShares({contributorUrl:r.contributorUrl,viewerUrl:r.viewerUrl});setShowShares(true);setMessage("Session created.");}catch(e){setError(e instanceof Error?e.message:"Could not create session.");}finally{setBusy(false);}}
- async function getLinks(){if(!selectedId)return;try{const r=await apiRequest<Shares>("/v1/sessions/"+selectedId+"/share-links",{method:"POST"});setShares(r);setShowShares(true);}catch(e){setError(e instanceof Error?e.message:"Could not create share links.");}}
- async function command(command:string,payload:Record<string,unknown>={}){if(!selectedId)return;try{await apiRequest("/v1/sessions/"+selectedId+"/production",{method:"POST",body:JSON.stringify({command,payload})});setMessage("Control saved. It will take effect when the programme engine is connected.");}catch(e){setError(e instanceof Error?e.message:"Control failed.");}}
- async function start(){if(!selectedId)return;try{const r=await apiRequest<{message:string}>("/v1/sessions/"+selectedId+"/start",{method:"POST"});setProgrammeNotice(r.message);await refreshDetail();await refreshSessions();}catch(e){setError(e instanceof Error?e.message:"Could not start session.");}}
- async function end(){if(!selectedId||!window.confirm("End this session? Contributors will no longer be able to join."))return;try{const r=await apiRequest<{message:string}>("/v1/sessions/"+selectedId+"/end",{method:"POST"});setProgrammeNotice(r.message);await refreshDetail();await refreshSessions();}catch(e){setError(e instanceof Error?e.message:"Could not end session.");}}
- async function upload(e:React.ChangeEvent<HTMLInputElement>){const file=e.target.files?.[0];if(!file||!selectedId)return;const fd=new FormData();fd.append("file",file);try{await apiRequest("/v1/sessions/"+selectedId+"/assets",{method:"POST",body:fd});await refreshDetail();setMessage("Media uploaded to private Cloudflare R2 storage.");}catch(err){setError(err instanceof Error?err.message:"Upload failed.");}finally{e.target.value="";}}
- async function copy(value:string){try{await navigator.clipboard.writeText(value);setMessage("Link copied.");}catch{setMessage(value);}}
+  setDetail(null);setShares(null);setShowShares(false);setHostToken("");
+  if(!selectedId)return;
+  let active=true;
+  const load=async()=>{
+   try{
+    const result=await apiRequest<Detail>("/v1/sessions/"+selectedId);
+    if(active)setDetail(result);
+   }catch(reason){if(active)setError(reason instanceof Error?reason.message:"Could not load session.");}
+  };
+  void load();
+  const timer=window.setInterval(()=>{if(active)void load();},8000);
+  return()=>{active=false;window.clearInterval(timer);};
+ },[selectedId]);
+
+ useEffect(()=>{
+  if(!selectedId||detail?.session.status!=="live"||hostToken)return;
+  let active=true;
+  apiRequest<{authToken:string}>("/v1/sessions/"+selectedId+"/owner-token",{method:"POST"})
+   .then(result=>{if(active)setHostToken(result.authToken);})
+   .catch(reason=>{if(active)setError(reason instanceof Error?reason.message:"Could not reconnect the host meeting.");});
+  return()=>{active=false;};
+ },[selectedId,detail?.session.status,hostToken]);
+
+ const activeCameraCount=useMemo(()=>detail?.contributors.filter(c=>c.status!=="disconnected"&&c.status!=="removed").length??0,[detail]);
+ const liveRecording=detail?.recordings.find(r=>!r.deleted_at&&["INVOKED","RECORDING","UPLOADING","PROCESSING"].includes((r.status||"").toUpperCase()));
+
+ async function createSession(event:React.FormEvent){
+  event.preventDefault();setBusy(true);setError("");setMessage("");
+  try{
+   const result=await apiRequest<{session:Session;contributorUrl:string;viewerUrl:string}>("/v1/sessions",{
+    method:"POST",body:JSON.stringify({title,scheduledAt:schedule?new Date(schedule).toISOString():null})
+   });
+   setTitle("");setSchedule("");setSessions(current=>[result.session,...current]);setSelectedId(result.session.id);
+   setShares({contributorUrl:result.contributorUrl,viewerUrl:result.viewerUrl});setShowShares(true);setMessage("Your session has been created.");
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not create a session.");}
+  finally{setBusy(false);}
+ }
+ async function getLinks(){
+  if(!selectedId)return;
+  setError("");setMessage("");
+  try{const result=await apiRequest<Shares>("/v1/sessions/"+selectedId+"/share-links",{method:"POST"});setShares(result);setShowShares(true);setMessage("New contributor and viewer links created. Older links are now invalid.");}
+  catch(reason){setError(reason instanceof Error?reason.message:"Could not generate share links.");}
+ }
+ async function copyLink(value:string){
+  try{await navigator.clipboard.writeText(value);setMessage("Link copied.");}
+  catch{setMessage(value);}
+ }
+ async function start(){
+  if(!selectedId)return;
+  setBusy(true);setError("");setMessage("");
+  try{
+   const result=await apiRequest<{hostAuthToken:string;message:string}>("/v1/sessions/"+selectedId+"/start",{method:"POST"});
+   setHostToken(result.hostAuthToken);setMessage(result.message);await refreshDetail();await refreshSessions();
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not start the broadcast.");}
+  finally{setBusy(false);}
+ }
+ async function end(){
+  if(!selectedId||!window.confirm("End this broadcast? Contributors will no longer be able to join."))return;
+  setBusy(true);setError("");
+  try{
+   const result=await apiRequest<{recordingAvailable:boolean;recordingRetentionUntil:string}>("/v1/sessions/"+selectedId+"/end",{method:"POST"});
+   setHostToken("");setMessage(result.recordingAvailable?"Broadcast ended. The composite recording is being finalized.":"Broadcast ended.");
+   await refreshDetail();await refreshSessions();
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not end the broadcast.");}
+  finally{setBusy(false);}
+ }
+ async function startRecording(){
+  if(!selectedId)return;
+  setRecordingBusy(true);setError("");
+  try{
+   const result=await apiRequest<{recordingId:string;status:string}>("/v1/sessions/"+selectedId+"/recording/start",{method:"POST"});
+   setMessage("Composite recording requested ("+result.status+").");
+   await refreshDetail();
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not start recording.");}
+  finally{setRecordingBusy(false);}
+ }
+ async function stopRecording(){
+  if(!selectedId)return;
+  setRecordingBusy(true);setError("");
+  try{
+   const result=await apiRequest<{downloadReady:boolean;status:string}>("/v1/sessions/"+selectedId+"/recording/stop",{method:"POST"});
+   setMessage(result.downloadReady?"Recording finalized and ready to download.":"Recording stop requested; the file may still be processing.");
+   await refreshDetail();
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not stop recording.");}
+  finally{setRecordingBusy(false);}
+ }
+ async function muteContributor(contributor:CameraRow){
+  try{
+   const next=!contributor.audio_muted;
+   const result=await apiRequest<{applied:boolean;message:string}>("/v1/sessions/"+selectedId+"/production",{
+    method:"POST",body:JSON.stringify({command:"mute-contributor",payload:{contributorId:contributor.id,muted:next}})
+   });
+   setMessage(result.message);await refreshDetail();
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not change microphone state.");}
+ }
+ async function muteAll(){
+  try{
+   const result=await apiRequest<{applied:boolean;message:string}>("/v1/sessions/"+selectedId+"/production",{
+    method:"POST",body:JSON.stringify({command:"set-audio-mix",payload:{muteAll:true}})
+   });
+   setMessage(result.message);await refreshDetail();
+  }catch(reason){setError(reason instanceof Error?reason.message:"Could not mute participant microphones.");}
+ }
+ async function upload(event:React.ChangeEvent<HTMLInputElement>){
+  const file=event.target.files?.[0];if(!file||!selectedId)return;
+  const form=new FormData();form.append("file",file);
+  setError("");setMessage("");
+  try{await apiRequest("/v1/sessions/"+selectedId+"/assets",{method:"POST",body:form});setMessage("Media uploaded to your private Cloudflare R2 library.");await refreshDetail();}
+  catch(reason){setError(reason instanceof Error?reason.message:"Upload failed.");}
+  finally{event.target.value="";}
+ }
+ const isLive=detail?.session.status==="live";
  return <main className="studio-shell">
-  <header className="topbar"><div className="brand-lockup"><div className="brand-mark"><Radio/></div><div><b>GOZIE LIVE</b><small>Broadcast studio</small></div></div><div className="topbar-actions"><span className="user-email">{userEmail}</span><button className="icon-button" onClick={onSignOut} title="Sign out"><LogOut size={18}/></button></div></header>
-  <section className="studio-heading"><div><span className="eyebrow">CONTROL ROOM</span><h1>Broadcast studio</h1><p>Manage sessions, receive camera feeds and prepare your programme.</p></div><div className="status-pill"><span className="feed-live-dot"/> Cloudflare platform</div></section>
+  <header className="topbar"><div className="brand-lockup"><div className="brand-mark"><Radio/></div><div><b>GOZIE LIVE</b><small>Cloudflare broadcast studio</small></div></div><div className="topbar-actions"><span className="user-email">{userEmail}</span><button className="icon-button" onClick={onSignOut} title="Sign out"><LogOut size={18}/></button></div></header>
+  <section className="studio-heading"><div><span className="eyebrow">CONTROL ROOM</span><h1>Broadcast studio</h1><p>Create sessions, invite contributors and manage your live programme.</p></div><span className="status-pill"><span className="feed-live-dot"/> Cloudflare platform</span></section>
   {error&&<div className="inline-error">{error}</div>}{message&&<div className="inline-success">{message}</div>}
-  <div className="studio-layout"><aside className="studio-sidebar">
-   <div className="panel-heading"><h3>Your sessions</h3><span>{sessions.length}</span></div>
-   <form className="create-session-form" onSubmit={createSession}><label>Session title<input required maxLength={120} value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Sunday Live Service"/></label><label>Schedule (optional)<input type="datetime-local" value={schedule} onChange={e=>setSchedule(e.target.value)}/></label><button className="primary-button full-width" disabled={busy}>{busy?"Creating…":"Create session"}</button></form>
-   <div className="session-list">{sessions.map(s=><button key={s.id} className={selectedId===s.id?"session-item selected":"session-item"} onClick={()=>{setSelectedId(s.id);setShares(null);}}><span className="session-status-dot"/><span><b>{s.title}</b><small>{s.status} · {new Date(s.scheduled_at||s.live_started_at||Date.now()).toLocaleString()}</small></span></button>)}</div>
-  </aside>
-  <section className="studio-main">{!detail?<div className="empty-state"><Radio size={34}/><h2>Select or create a session</h2><p>Your control room appears here.</p></div>:<>
-   <div className="session-overview"><div><span className="eyebrow">SELECTED SESSION</span><h2>{detail.session.title}</h2><p>Session status: <b>{detail.session.status}</b></p></div><div className="overview-actions"><button className="secondary-button" onClick={getLinks}><Share2 size={16}/> Share links</button>{detail.session.status!=="ended"?<><button className="primary-button" onClick={start} disabled={detail.session.status==="live"}><Radio size={16}/> Start session</button><button className="danger-button" onClick={end}>End</button></>:<span className="status-pill">Ended</span>}</div></div>
-   {showShares&&shares&&<div className="share-grid"><div className="share-card"><div><b>Camera contributor link</b><small>Send this to camera operators only.</small><input readOnly value={shares.contributorUrl}/><button className="text-button" onClick={()=>copy(shares.contributorUrl)}><Copy size={14}/> Copy contributor link</button></div><QRCodeSVG value={shares.contributorUrl} size={92}/></div><div className="share-card"><div><b>Viewer link</b><small>Share with your audience.</small><input readOnly value={shares.viewerUrl}/><button className="text-button" onClick={()=>copy(shares.viewerUrl)}><Copy size={14}/> Copy viewer link</button></div><QRCodeSVG value={shares.viewerUrl} size={92}/></div></div>}
-   <div className="metrics-row"><div className="metric-card"><Users/><b>{detail.activeCameraSlots??activeCameras.length}/200</b><small>Active camera slots</small></div><div className="metric-card"><Activity/><b>{detail.viewerCount}</b><small>Viewers connected</small></div><div className="metric-card"><Video/><b>{activeCameras.length}</b><small>Publishing feeds</small></div></div>
-   <div className="section-heading"><div><h3>Camera monitor</h3><p>Up to 12 camera previews are subscribed at once.</p></div><span className="status-pill">{activeCameras.length} publishing</span></div>
-   {activeCameras.length?<><div className="camera-grid">{pageCameras.map(c=>{const stream=streams[c.id],video=stream?.getVideoTracks()[0],audio=stream?.getAudioTracks()[0];return <article className="camera-card" key={c.id}><div className="camera-preview">{video?<video autoPlay playsInline muted ref={el=>{if(el&&stream&&el.srcObject!==stream)el.srcObject=stream;}}/>:<div className="feed-no-video"><Camera size={28}/><span>Waiting for preview</span></div>}{audio&&<audio autoPlay controls muted={c.audio_muted} ref={el=>{if(el&&stream&&el.srcObject!==stream)el.srcObject=stream;}}/>}</div><div className="camera-card-info"><b>{c.display_name}</b><small>{c.status}</small></div><div className="camera-card-actions"><button className="secondary-button" onClick={()=>{setSelectedSource(c.id);void command("select-source",{participantIdentity:c.publisher_session_id});}}><MonitorPlay size={14}/>{selectedSource===c.id?"Selected":"Select source"}</button><button className="icon-button" onClick={()=>void command("mute-contributor",{contributorId:c.id,muted:!c.audio_muted})} title={c.audio_muted?"Unmute":"Mute"}>{c.audio_muted?<MicOff size={16}/>:<Mic size={16}/>}</button></div></article>;})}</div><div className="pagination"><button className="secondary-button" disabled={page===0} onClick={()=>setPage(p=>p-1)}>Previous</button><span>Page {page+1} of {pageCount}</span><button className="secondary-button" disabled={page>=pageCount-1} onClick={()=>setPage(p=>p+1)}>Next</button></div></>:<div className="empty-state compact"><Camera size={30}/><h3>No camera feeds yet</h3><p>Create a contributor link and open it on another phone to publish a camera.</p></div>}
-   <div className="section-heading"><div><h3>Media library</h3><p>Upload images, videos and audio to the private R2 bucket.</p></div><label className="secondary-button upload-button"><Upload size={16}/> Add media<input type="file" accept="image/*,video/*,audio/*" onChange={upload} hidden/></label></div>
-   <div className="asset-list">{detail.assets.map(a=><div key={a.id} className="asset-item"><span>{a.asset_kind.toUpperCase()}</span><b>{a.file_name}</b><small>{a.content_type}</small><button className="text-button" onClick={()=>void command("set-media-source",{assetId:a.id})}>Queue for programme</button></div>)}{!detail.assets.length&&<p className="muted">No uploaded media yet.</p>}</div>
-   <div className="programme-panel"><div><span className="eyebrow">PROGRAMME OUTPUT</span><h3>Final viewer broadcast</h3><p>{programmeNotice}</p></div><div className="offline-preview"><Radio size={30}/><b>Programme engine not connected</b><small>Camera feeds can arrive, but viewers do not yet receive a mixed final programme.</small></div></div>
-   <div className="section-heading"><div><h3>Recordings</h3><p>Recording and seven-day expiry are not active until the compositor is deployed.</p></div></div>
-   <div className="asset-list">{detail.recordings.map(r=><div className="asset-item" key={r.id}><b>Programme recording</b><small>Expires {new Date(r.expires_at).toLocaleString()}</small></div>)}{!detail.recordings.length&&<p className="muted">No recordings available.</p>}</div>
-  </>}</section></div>
+  <div className="studio-layout">
+   <aside className="studio-sidebar">
+    <div className="panel-heading"><h3>Your sessions</h3><span>{sessions.length}</span></div>
+    <form className="create-session-form" onSubmit={createSession}>
+     <label>Session title<input required maxLength={120} value={title} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Sunday Live Service"/></label>
+     <label>Schedule (optional)<input type="datetime-local" value={schedule} onChange={e=>setSchedule(e.target.value)}/></label>
+     <button className="primary-button full-width" disabled={busy}>{busy?"Working…":"Create session"}</button>
+    </form>
+    <div className="session-list">{sessions.map(session=><button key={session.id} className={selectedId===session.id?"session-item selected":"session-item"} onClick={()=>setSelectedId(session.id)}><span className="session-status-dot"/><span><b>{session.title}</b><small>{session.status} · {new Date(session.scheduled_at||session.live_started_at||Date.now()).toLocaleString()}</small></span></button>)}</div>
+    <button className="secondary-button full-width" onClick={()=>void refreshSessions()}><RefreshCw size={15}/> Refresh sessions</button>
+   </aside>
+   <section className="studio-main">
+    {!detail?<div className="empty-state"><Radio size={34}/><h2>Select or create a session</h2><p>Your control room will appear here.</p></div>:<>
+     <div className="session-overview"><div><span className="eyebrow">SELECTED SESSION</span><h2>{detail.session.title}</h2><p>Session status: <b>{detail.session.status}</b></p></div>
+      <div className="overview-actions">
+       <button className="secondary-button" onClick={()=>void getLinks()}><Share2 size={16}/> Share links</button>
+       {!isLive&&detail.session.status!=="ended"?<button className="primary-button" onClick={()=>void start()} disabled={busy}><Play size={16}/> Start broadcast</button>:null}
+       {isLive?<button className="danger-button" onClick={()=>void end()} disabled={busy}><Square size={15}/> End broadcast</button>:null}
+       {detail.session.status==="ended"?<span className="status-pill">Broadcast ended</span>:null}
+      </div>
+     </div>
+     {showShares&&shares&&<div className="share-grid">
+      <div className="share-card"><div><b>Camera contributor link</b><small>Send this link only to camera operators.</small><input readOnly value={shares.contributorUrl}/><button className="text-button" onClick={()=>void copyLink(shares.contributorUrl)}><Copy size={14}/> Copy link</button></div><QRCodeSVG value={shares.contributorUrl} size={92}/></div>
+      <div className="share-card"><div><b>Viewer link</b><small>Share this with your audience.</small><input readOnly value={shares.viewerUrl}/><button className="text-button" onClick={()=>void copyLink(shares.viewerUrl)}><Copy size={14}/> Copy link</button></div><QRCodeSVG value={shares.viewerUrl} size={92}/></div>
+     </div>}
+     <div className="metrics-row">
+      <div className="metric-card"><Camera/><b>{detail.activeCameraSlots??activeCameraCount}/200</b><small>Active contributor slots</small></div>
+      <div className="metric-card"><Users/><b>{detail.viewerCount}</b><small>Viewers connected</small></div>
+      <div className="metric-card"><Video/><b>{activeCameraCount}</b><small>Camera participants</small></div>
+     </div>
+     <div className="section-heading"><div><h3>Camera and host control room</h3><p>RealtimeKit supports host spotlight/pin controls and paginated participant views.</p></div><span className="status-pill">{activeCameraCount} contributors admitted</span></div>
+     {isLive&&hostToken?<RealtimeKitRoom key={selectedId} authToken={hostToken} role="host" onLeave={()=>setHostToken("")}/>:
+      isLive?<div className="empty-state compact"><Radio size={28}/><h3>Host controls connecting</h3><p>Use Rejoin host controls if this takes too long.</p><button className="secondary-button" onClick={()=>void apiRequest<{authToken:string}>("/v1/sessions/"+selectedId+"/owner-token",{method:"POST"}).then(r=>setHostToken(r.authToken)).catch(e=>setError(e.message))}>Rejoin host controls</button></div>:
+      <div className="empty-state compact"><Camera size={28}/><h3>{detail.session.status==="ended"?"This broadcast has ended":"Start the broadcast to open the host room"}</h3><p>Once started, the host room will allow you to see admitted camera feeds, pin or spotlight participants and manage meeting permissions.</p></div>}
+     <div className="programme-panel">
+      <div><span className="eyebrow">FINAL PROGRAMME</span><h3>Audience livestream</h3><p>{detail.playbackUrl?"One HLS programme URL is assigned to all viewers.":"The livestream URL is created when the broadcast starts."}</p></div>
+      {detail.playbackUrl?<HlsPlayer src={detail.playbackUrl} title={detail.session.title}/>:<div className="offline-preview"><Radio size={28}/><b>Programme has not started</b><small>Start the broadcast to create the audience stream.</small></div>}
+     </div>
+     <div className="section-heading recording-heading"><div><h3>Programme recording</h3><p>Start a composite recording of the RealtimeKit meeting. The retention period is seven days after the session ends.</p></div>
+      {isLive&&!liveRecording?<button className="primary-button" onClick={()=>void startRecording()} disabled={recordingBusy}><Radio size={15}/> Start recording</button>:null}
+      {isLive&&liveRecording?<button className="danger-button" onClick={()=>void stopRecording()} disabled={recordingBusy}><Square size={15}/> Stop recording</button>:null}
+     </div>
+     <div className="asset-list">
+      {detail.recordings.map(recording=><div className="asset-item" key={recording.id}><span>MP4</span><div><b>Composite programme recording</b><small>{recording.status} · expires {new Date(recording.expires_at).toLocaleDateString()}</small></div><a className="secondary-button" href={"/v1/recordings/download?id="+encodeURIComponent(recording.id)}><Download size={14}/> Download</a></div>)}
+      {!detail.recordings.length&&<p className="muted">No recordings have been created for this session.</p>}
+     </div>
+     <div className="section-heading"><div><h3>Contributor roster</h3><p>Individual microphone mute is available from the host controls and this roster.</p></div><button className="secondary-button" onClick={()=>void muteAll()} disabled={!isLive||!detail.contributors.length}><MicOff size={15}/> Mute all</button></div>
+     <div className="asset-list">
+      {detail.contributors.map(contributor=><div className="asset-item" key={contributor.id}><span>{contributor.status==="disconnected"?"OFFLINE":"CAM"}</span><div><b>{contributor.display_name}</b><small>{contributor.status}{contributor.audio_muted?" · microphone muted":""}</small></div><button className="secondary-button" onClick={()=>void muteContributor(contributor)} disabled={!isLive||contributor.status==="disconnected"}>{contributor.audio_muted?<Mic size={14}/>:<MicOff size={14}/>} {contributor.audio_muted?"Unmute":"Mute"}</button></div>)}
+      {!detail.contributors.length&&<p className="muted">No camera contributors have joined yet.</p>}
+     </div>
+     <div className="section-heading"><div><h3>Media library</h3><p>Upload private images, videos and audio to Cloudflare R2.</p></div><label className="secondary-button upload-button"><Upload size={15}/> Add media<input type="file" accept="image/*,video/*,audio/*" hidden onChange={upload}/></label></div>
+     <div className="asset-list">
+      {detail.assets.map(asset=><div className="asset-item" key={asset.id}><span>{asset.asset_kind.toUpperCase()}</span><div><b>{asset.file_name}</b><small>{asset.content_type}</small></div><span className="status-pill">Stored in R2</span></div>)}
+      {!detail.assets.length&&<p className="muted">No uploaded media yet.</p>}
+     </div>
+     <div className="setup-note">Media uploads are stored in R2, but automatic picture replacement and imported audio mixing have not been connected to the live programme yet. The RealtimeKit host controls can spotlight/pin camera participants; a custom scene compositor and independent audio mixer remain future work.</div>
+    </>}
+   </section>
+  </div>
  </main>;
 }
