@@ -160,12 +160,25 @@ async function startBroadcastEngine(env: Env, session: SessionRow): Promise<Reco
   if (existing[0]?.status === "running" || existing[0]?.status === "starting") {
     return { session, mediaEngine: existing[0].status, broadcastOutput: "startup-requested", recordingEnabled: Boolean(existing[0].recording_object_key), alreadyRunning: true };
   }
+  if (existing[0] && existing[0].status !== "failed") {
+    throw new Response("This session already has a completed or stopping production run and cannot be restarted.", { status: 409 });
+  }
   const controlCode = randomCode();
-  const inserted = await db<EngineRunRow[]>(env, "production_engine_runs", {
-    method: "POST", headers: { prefer: "return=representation" },
-    body: JSON.stringify({ session_id: session.id, control_code_hash: await sha256(controlCode), status: "starting" })
-  });
-  const run = inserted[0];
+  const controlCodeHash = await sha256(controlCode);
+  const runRows = existing[0]
+    ? await db<EngineRunRow[]>(env, "production_engine_runs?id=eq." + existing[0].id, {
+        method: "PATCH", headers: { prefer: "return=representation" },
+        body: JSON.stringify({
+          control_code_hash: controlCodeHash, ingress_id: null, egress_id: null,
+          recording_object_key: null, selected_source_identity: null, selected_asset_id: null,
+          status: "starting", last_error: null, started_at: nowIso(), ended_at: null, updated_at: nowIso()
+        })
+      })
+    : await db<EngineRunRow[]>(env, "production_engine_runs", {
+        method: "POST", headers: { prefer: "return=representation" },
+        body: JSON.stringify({ session_id: session.id, control_code_hash: controlCodeHash, status: "starting" })
+      });
+  const run = runRows[0];
   let ingressId = "";
   try {
     const inputRoom = sessionRoom(session.id, "contributors");
