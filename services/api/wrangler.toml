@@ -6,6 +6,12 @@ compatibility_date = "2026-11-24"
 APP_ORIGIN = "https://henrymeraldcompany-bit.github.io"
 APP_BASE_PATH = "/gozie-live/"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "gozie-live-db"
+database_id = "67f8680e-5c19-4cc6-b082-65d12dc7846a"
+migrations_dir = "../../database/cloudflare-d1"
+
 [[r2_buckets]]
 binding = "MEDIA_BUCKET"
 bucket_name = "gozie-live-media"
