@@ -2,7 +2,7 @@
 
 ## Media flow
 
-1. Admin authenticates through Supabase Auth and creates a session in the API.
+1. Admin authenticates through Supabase Auth and creates a session in the API. Contributor admission is transactionally limited to 200 active slots per session; camera clients heartbeat every 20 seconds and presence older than 60 seconds is treated as stale.
 2. The API returns two independent share links: contributor and viewer.
 3. Each contributor receives a short-lived LiveKit token restricted to publishing in the contributor room, without subscribing to other cameras.
 4. Admin receives subscribe-only access to the contributor room for monitoring.
