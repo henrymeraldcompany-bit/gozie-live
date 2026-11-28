@@ -28,12 +28,15 @@ jobs:
       - name: Compile Cloudflare API Worker modules
         run: npx tsc -p services/api/tsconfig.json --noEmit false --outDir services/api/build
       - name: Bundle Cloudflare Worker and npm dependencies
-        run: npx esbuild services/api/src/index.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=services/api/build/index.js
+        run: |
+          npx esbuild services/api/src/index.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=services/api/build/index.js
+          npx esbuild services/api/src/password-hash.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=services/api/build/password-hash.js
       - name: Assemble Cloudflare deployment artifact
         run: |
           mkdir -p cloudflare-deploy/worker cloudflare-deploy/assets
           cp services/api/build/index.js cloudflare-deploy/worker/index.js
           cp services/api/build/generated-assets.js cloudflare-deploy/worker/generated-assets.js
+          cp services/api/build/password-hash.js cloudflare-deploy/worker/password-hash.js
       - name: Upload Cloudflare deployment artifact
         uses: actions/upload-artifact@v4
         with:
@@ -62,7 +65,8 @@ jobs:
             const parent = await github.rest.git.getCommit({ owner, repo, commit_sha: parentSha });
             const files = [
               ['worker/index.js', 'services/api/build/index.js'],
-              ['worker/generated-assets.js', 'services/api/build/generated-assets.js']
+              ['worker/generated-assets.js', 'services/api/build/generated-assets.js'],
+              ['worker/password-hash.js', 'services/api/build/password-hash.js']
             ];
             const tree = [];
             for (const [path, source] of files) {
