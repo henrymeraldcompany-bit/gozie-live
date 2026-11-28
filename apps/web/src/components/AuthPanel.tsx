@@ -59,7 +59,6 @@ export default function AuthPanel({onAuthenticated}:{onAuthenticated:()=>void}){
    {message&&<div className="inline-success">{message}</div>}
    <button className="primary-button full-width" disabled={busy}>{busy?"Please wait…":mode==="signin"?"Sign in":"Create account"}</button>
    <button type="button" className="text-button" onClick={()=>{setError("");setMessage("");setMode(mode==="signin"?"register":"signin");}}>{mode==="signin"?"New host? Create an account":"Back to sign in"}</button>
-   <div className="setup-note">Host accounts and sign-in sessions are stored securely in Cloudflare D1. Registration does not require an external email service. Use a unique email address and a strong password.</div>
   </form>
  </div>;
 }
