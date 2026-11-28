@@ -1,5 +1,4 @@
-import { pbkdf2Async } from "@noble/hashes/pbkdf2.js";
-import { sha256 } from "@noble/hashes/sha2.js";
+import { derivePasswordHash } from "./password-hash.js";
 import { STATIC_ASSETS_GZIP_B64 } from "./generated-assets.js";
 interface D1Stmt {
  bind(...values: unknown[]): D1Stmt;
@@ -31,17 +30,6 @@ const hex=(b:Uint8Array)=>[...b].map(x=>x.toString(16).padStart(2,"0")).join("")
 const random=(n=32)=>hex(crypto.getRandomValues(new Uint8Array(n)));
 async function hash(s:string){return hex(new Uint8Array(await crypto.subtle.digest("SHA-256",enc.encode(s))));}
 function equal(a:string,b:string){if(a.length!==b.length)return false;let x=0;for(let i=0;i<a.length;i++)x|=a.charCodeAt(i)^b.charCodeAt(i);return x===0;}
-const PASSWORD_HASH_ITERATIONS=310000;
-const PASSWORD_HASH_BYTES=32;
-async function derivePasswordHash(password:string,salt:string):Promise<Uint8Array>{
- // Workers caps native PBKDF2 at 100,000 iterations. Noble's audited
- // pure-JS PBKDF2 keeps the original 310,000-round hash byte-for-byte compatible.
- return pbkdf2Async(sha256,password,salt,{
-  c:PASSWORD_HASH_ITERATIONS,
-  dkLen:PASSWORD_HASH_BYTES,
-  asyncTick:10
- });
-}
 async function passHash(password:string,salt=random(16)){
  const derived=await derivePasswordHash(password,salt);
  return salt+":"+hex(derived);
