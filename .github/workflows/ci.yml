@@ -17,6 +17,8 @@ jobs:
           node-version: 24
       - run: npm install
       - run: npm run typecheck
+      - name: Verify PBKDF2 compatibility at 310000 rounds
+        run: npm run test:password-hash --workspace @gozie-live/api
       - name: Build production website
         run: npm run build
         env:
