@@ -1,3 +1,4 @@
+import { pbkdf2 } from "node:crypto";
 import { STATIC_ASSETS_GZIP_B64 } from "./generated-assets.js";
 const enc = new TextEncoder();
 const now = () => new Date().toISOString();
@@ -25,8 +26,29 @@ async function hash(s) { return hex(new Uint8Array(await crypto.subtle.digest("S
 function equal(a, b) { if (a.length !== b.length)
     return false; let x = 0; for (let i = 0; i < a.length; i++)
     x |= a.charCodeAt(i) ^ b.charCodeAt(i); return x === 0; }
-async function passHash(password, salt = random(16)) { const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, ["deriveBits"]); const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: enc.encode(salt), iterations: 310000, hash: "SHA-256" }, key, 256); return salt + ":" + hex(new Uint8Array(bits)); }
-async function passCheck(password, stored) { const [salt] = stored.split(":"); return !!salt && equal(await passHash(password, salt), stored); }
+const PASSWORD_HASH_ITERATIONS = 310000;
+const PASSWORD_HASH_BYTES = 32;
+function derivePasswordHash(password, salt) {
+    return new Promise((resolve, reject) => {
+        pbkdf2(password, salt, PASSWORD_HASH_ITERATIONS, PASSWORD_HASH_BYTES, "sha256", (error, derivedKey) => {
+            if (error) {
+                reject(error);
+                return;
+            }
+            resolve(new Uint8Array(derivedKey));
+        });
+    });
+}
+async function passHash(password, salt = random(16)) {
+    const derived = await derivePasswordHash(password, salt);
+    return salt + ":" + hex(derived);
+}
+async function passCheck(password, stored) {
+    const [salt, expected, extra] = stored.split(":");
+    if (extra !== undefined || !salt || !expected || !/^[a-f0-9]{32}$/i.test(salt) || !/^[a-f0-9]{64}$/i.test(expected))
+        return false;
+    return equal(hex(await derivePasswordHash(password, salt)), expected.toLowerCase());
+}
 const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", ...Object.fromEntries(new Headers(headers).entries()) } });
 const fail = (message, status = 400) => json({ error: message }, status);
 function cookie(req) { for (const part of (req.headers.get("cookie") || "").split(";")) {
