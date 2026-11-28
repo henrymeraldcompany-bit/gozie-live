@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "test:password-hash": "node test/password-hash.mjs"
   },
   "devDependencies": {
     "typescript": "~5.7.2",
