@@ -25,6 +25,8 @@ jobs:
         run: node scripts/embed-assets.mjs
       - name: Compile Cloudflare API Worker modules
         run: npx tsc -p services/api/tsconfig.json --noEmit false --outDir services/api/build
+      - name: Bundle Cloudflare Worker and npm dependencies
+        run: npx esbuild services/api/src/index.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=services/api/build/index.js
       - name: Assemble Cloudflare deployment artifact
         run: |
           mkdir -p cloudflare-deploy/worker cloudflare-deploy/assets
